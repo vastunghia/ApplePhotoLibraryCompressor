@@ -149,7 +149,7 @@ needed:
   **Photos** — to carry keywords, title and caption across.
 
 Only the first is required. Without the second, conversion proceeds and says so,
-and `<out>/metadata-restore.json` records what each new asset should have got.
+and the ledger still records what each new asset was meant to carry.
 
 ## Use
 
@@ -248,3 +248,7 @@ photos to those of everyone you share with.
   implemented, and it is a considerably harder problem: video has no equivalent of
   SSIM-per-frame cheap enough to gate on, and Live Photos complicate the asset
   model further.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

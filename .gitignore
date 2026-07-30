@@ -5,11 +5,8 @@
 Package.resolved
 
 # Staging output: converted files and ledgers should never be committed.
-# --out can point anywhere, so match the artefacts by name too, not just the
-# default directory.
 staging/
 *.jsonl
-metadata-restore.json
 
 # Working notes for the coding agent. Deliberately not published: they describe
 # the library this was developed against.

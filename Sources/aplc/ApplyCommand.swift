@@ -147,10 +147,6 @@ struct Apply: AsyncParsableCommand {
             }
         }
 
-        // Always write the restore file, before attempting the transfer: if the
-        // Apple Events path fails, this is what makes the metadata recoverable.
-        let restoreURL = try writeRestoreFile(pendingText, filenames: createdFilenames)
-
         let textReport = await transferTextMetadata(pendingText, ledger: ledger,
                                                     filenames: createdFilenames)
 
@@ -167,8 +163,10 @@ struct Apply: AsyncParsableCommand {
             Your originals are untouched. Nothing was deleted.
 
             Keywords, title and caption are carried over through Photos' scripting
-            interface, since PhotoKit has no write API for them. If that did not run,
-            \(restoreURL.lastPathComponent) holds what each new asset should carry.
+            interface, since PhotoKit has no write API for them, then read back to
+            confirm they stuck. Anything that did not is reported above rather than
+            passed over, and the ledger records what each new asset was meant to
+            carry — so a failed transfer can be repeated by hand, not reconstructed.
 
             Not carried over: People assignments — no supported API can set them. They
             are normally re-derived on their own, because Photos assigns faces by
@@ -252,30 +250,6 @@ struct Apply: AsyncParsableCommand {
         guard Set(expected.keywords) == Set(actual.keywords) else { return false }
         guard (expected.title ?? "") == (actual.title ?? "") else { return false }
         return (expected.caption ?? "") == (actual.caption ?? "")
-    }
-
-    @discardableResult
-    private func writeRestoreFile(
-        _ assignments: [String: AssetTextMetadata],
-        filenames: [String: String]
-    ) throws -> URL {
-        struct RestoreRecord: Encodable {
-            let createdAssetLocalIdentifier: String
-            let originalFilename: String
-            let metadata: AssetTextMetadata
-        }
-
-        let records = assignments
-            .map { RestoreRecord(createdAssetLocalIdentifier: $0.key,
-                                 originalFilename: filenames[$0.key] ?? "",
-                                 metadata: $0.value) }
-            .sorted { $0.createdAssetLocalIdentifier < $1.createdAssetLocalIdentifier }
-
-        let url = staging.stagingRoot.appendingPathComponent("metadata-restore.json")
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(records).write(to: url)
-        return url
     }
 
     /// Keeps the original stem so the pair stays recognisable side by side.
