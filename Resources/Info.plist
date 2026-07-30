@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.applephotolibrarycompressor.aplc</string>
+	<key>CFBundleName</key>
+	<string>aplc</string>
+	<key>CFBundleExecutable</key>
+	<string>aplc</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>aplc reads your photo library to find JPEG originals, transcodes copies of them to HEIC in a staging folder, and — only when you pass --confirm — adds the converted copies back as new assets. It never deletes or modifies existing photos.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>aplc asks Photos for the keywords, title and caption of the photos it converts, so the converted copies inherit them. PhotoKit has no write API for these, so Apple Events are the only supported way. aplc only reads those properties and sets them on the copies it created.</string>
+</dict>
+</plist>

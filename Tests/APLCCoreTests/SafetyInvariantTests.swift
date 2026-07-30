@@ -1,0 +1,130 @@
+import XCTest
+@testable import APLCCore
+
+/// These tests do not exercise behaviour — they guard the property that makes
+/// this tool safe to run against an irreplaceable photo library: the destructive
+/// PhotoKit calls are not merely unused, they are absent from the source.
+///
+/// If someone later adds `deleteAssets`, this fails and the reviewer has to make
+/// that a deliberate, visible decision rather than an incidental one.
+final class SafetyInvariantTests: XCTestCase {
+    /// PhotoKit calls that would destroy or overwrite existing library content.
+    private static let forbidden = [
+        // Moves assets to Recently Deleted.
+        "deleteAssets",
+        // Replaces an asset's current rendition.
+        "contentEditingOutput",
+        // Discards a user's edits.
+        "revertAssetContentToOriginal",
+        // Deletes albums or removes assets from them.
+        "deleteAssetCollections",
+        "removeAssets",
+        // Deletes the file we exported *from* the library rather than a copy.
+        "PHAssetChangeRequest.deleteAssets",
+        // Private API, and worse than everything above it: these act on an
+        // entire iCloud Shared Photo Library, so they would destroy the other
+        // participants' photos too — data the user could not restore. The
+        // symbols are absent from the public headers but present in Photos.tbd,
+        // so they are reachable; they stay out of this binary by choice.
+        "expungeLibraryScopes",
+        "trashLibraryScopes",
+        "PHLibraryScopeChangeRequest",
+    ]
+
+    private var sourceRoot: URL {
+        URL(fileURLWithPath: #filePath)          // .../Tests/APLCCoreTests/SafetyInvariantTests.swift
+            .deletingLastPathComponent()          // .../Tests/APLCCoreTests
+            .deletingLastPathComponent()          // .../Tests
+            .deletingLastPathComponent()          // package root
+            .appendingPathComponent("Sources")
+    }
+
+    private func swiftSources() throws -> [URL] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: sourceRoot, includingPropertiesForKeys: nil) else {
+            XCTFail("cannot enumerate \(sourceRoot.path)")
+            return []
+        }
+        return enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+    }
+
+    func testSourcesContainNoDestructivePhotoKitCalls() throws {
+        let sources = try swiftSources()
+        XCTAssertFalse(sources.isEmpty, "found no Swift sources to scan")
+
+        for url in sources {
+            // This file necessarily names the forbidden symbols.
+            if url.lastPathComponent == "SafetyInvariantTests.swift" { continue }
+
+            let text = try String(contentsOf: url, encoding: .utf8)
+            for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                // Comments explaining what the tool deliberately avoids are fine.
+                if trimmed.hasPrefix("//") || trimmed.hasPrefix("*") || trimmed.hasPrefix("/*") {
+                    continue
+                }
+                for symbol in Self.forbidden where line.contains(symbol) {
+                    XCTFail("""
+                        \(url.lastPathComponent) calls \(symbol), which can destroy \
+                        library content. This tool must only ever create assets.
+                        Offending line: \(trimmed)
+                        """)
+                }
+            }
+        }
+    }
+
+    /// Apple Events are a second route into the library, and Photos' dictionary
+    /// exposes destructive verbs there too. The generated scripts must only ever
+    /// set the three text properties.
+    func testGeneratedAppleScriptsAreNonDestructive() {
+        let scripts = [
+            PhotosScripting.readScript(album: "Any Album"),
+            PhotosScripting.writeScript(for: [
+                ("A/L0/001", AssetTextMetadata(keywords: ["k"], title: "t", caption: "c"))
+            ]),
+        ]
+
+        // Word-boundary matched so "deleted" inside a string would not trip it,
+        // and so `description` does not read as a hit for some substring.
+        let destructiveVerbs = ["delete", "remove", "duplicate", "move", "import", "export"]
+
+        for script in scripts {
+            let words = script
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .map { $0.lowercased() }
+            for verb in destructiveVerbs {
+                XCTAssertFalse(words.contains(verb),
+                               "generated AppleScript uses the verb \"\(verb)\":\n\(script)")
+            }
+        }
+    }
+
+    /// Whatever else changes, these are the only properties we may assign.
+    func testGeneratedAppleScriptsAssignOnlyPermittedProperties() {
+        let script = PhotosScripting.writeScript(for: [
+            ("A/L0/001", AssetTextMetadata(keywords: ["k"], title: "t", caption: "c"))
+        ])
+        let permitted = ["set keywords of m to", "set name of m to",
+                         "set description of m to", "set m to media item id",
+                         "set failed to", "set end of failed to"]
+
+        for line in script.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("set ") else { continue }
+            XCTAssertTrue(permitted.contains { trimmed.hasPrefix($0) },
+                          "unexpected assignment in generated script: \(trimmed)")
+        }
+    }
+
+    /// The staging directory is a safety net; nothing should move files out of it.
+    func testImporterCopiesRatherThanMovesStagedFiles() throws {
+        let importer = sourceRoot
+            .appendingPathComponent("APLCCore/Importer.swift")
+        let text = try String(contentsOf: importer, encoding: .utf8)
+        XCTAssertTrue(
+            text.contains("shouldMoveFile = false"),
+            "Importer must copy staged files into the library, never move them"
+        )
+    }
+}

@@ -1,0 +1,193 @@
+import Foundation
+import Photos
+
+public enum PhotoLibraryError: Error, CustomStringConvertible {
+    case notAuthorized(PHAuthorizationStatus)
+    case albumNotFound(String)
+    case ambiguousAlbum(String, count: Int)
+    case noOriginalResource(String)
+    case resourceUnavailableLocally
+    case exportFailed(String)
+
+    public var description: String {
+        switch self {
+        case .notAuthorized(let s):
+            return """
+                photo library access not granted (status: \(s.rawValue)).
+                Grant your terminal access under System Settings > Privacy & Security > Photos.
+                """
+        case .albumNotFound(let name):
+            return "no album titled \"\(name)\" was found"
+        case .ambiguousAlbum(let name, let count):
+            return "\(count) albums are titled \"\(name)\"; rename one so the target is unambiguous"
+        case .noOriginalResource(let id):
+            return "asset \(id) has no original photo resource"
+        case .resourceUnavailableLocally:
+            return "original is not available locally"
+        case .exportFailed(let m):
+            return "export failed: \(m)"
+        }
+    }
+}
+
+public enum PhotoLibraryAccess {
+    /// Requests read-write access, returning the resulting status.
+    ///
+    /// Read-write rather than add-only because the tool needs to *read*
+    /// originals; it still never deletes or modifies an existing asset.
+    @discardableResult
+    public static func authorize() async throws -> PHAuthorizationStatus {
+        let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if current == .authorized { return current }
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        guard status == .authorized else { throw PhotoLibraryError.notAuthorized(status) }
+        return status
+    }
+
+    /// Finds exactly one album with the given title, searching user albums first
+    /// and then smart albums. Refuses to guess when several match.
+    public static func findAlbum(titled title: String) throws -> PHAssetCollection {
+        var matches: [PHAssetCollection] = []
+        for type in [PHAssetCollectionType.album, .smartAlbum] {
+            let result = PHAssetCollection.fetchAssetCollections(with: type, subtype: .any, options: nil)
+            result.enumerateObjects { collection, _, _ in
+                if collection.localizedTitle == title { matches.append(collection) }
+            }
+            if !matches.isEmpty { break }
+        }
+        guard let first = matches.first else { throw PhotoLibraryError.albumNotFound(title) }
+        guard matches.count == 1 else {
+            throw PhotoLibraryError.ambiguousAlbum(title, count: matches.count)
+        }
+        return first
+    }
+
+    public static func imageAssets(in collection: PHAssetCollection) -> [PHAsset] {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        let result = PHAsset.fetchAssets(in: collection, options: options)
+        var assets: [PHAsset] = []
+        assets.reserveCapacity(result.count)
+        result.enumerateObjects { asset, _, _ in assets.append(asset) }
+        return assets
+    }
+
+    /// The resource holding the untouched original of a photo.
+    public static func originalPhotoResource(for asset: PHAsset) -> PHAssetResource? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        return resources.first { $0.type == .photo }
+    }
+
+    /// Lifts a `PHAsset` into the plain value type the gate reasons about.
+    ///
+    /// `isLocallyAvailable` is left `true` here; there is no public API to ask,
+    /// and it is answered honestly during export by trying without network first.
+    public static func traits(for asset: PHAsset) -> AssetTraits {
+        let resources = PHAssetResource.assetResources(for: asset)
+        let original = resources.first { $0.type == .photo }
+
+        let adjustmentBaseTypes: Set<PHAssetResourceType> = [
+            .adjustmentBasePhoto, .adjustmentBasePairedVideo, .adjustmentBaseVideo,
+        ]
+
+        return AssetTraits(
+            localIdentifier: asset.localIdentifier,
+            originalFilename: original?.originalFilename ?? "unknown",
+            // `uniformTypeIdentifier` rather than `contentType`: the latter is
+            // macOS 26+ and would crash on the macOS 15 machines this targets.
+            uniformTypeIdentifier: original?.uniformTypeIdentifier,
+            hasAdjustments: asset.hasAdjustments,
+            isLivePhoto: asset.playbackStyle == .livePhoto,
+            burstIdentifier: asset.burstIdentifier,
+            hasPairedVideoResource: resources.contains { $0.type == .pairedVideo || $0.type == .fullSizePairedVideo },
+            hasAdjustmentBaseResource: resources.contains { adjustmentBaseTypes.contains($0.type) },
+            isLocallyAvailable: true,
+            resourceByteCount: nil
+        )
+    }
+}
+
+/// Result of exporting an original out of the library.
+public struct ExportResult: Sendable {
+    public let url: URL
+    public let byteCount: Int
+    /// True when the bytes had to come down from iCloud, which is what the
+    /// download budget meters.
+    public let wasDownloaded: Bool
+}
+
+public actor OriginalExporter {
+    /// Cumulative bytes fetched from iCloud during this run.
+    public private(set) var downloadedBytes: Int = 0
+    /// Ceiling on `downloadedBytes`; nil means downloads are refused outright.
+    public let downloadBudgetBytes: Int?
+
+    public init(downloadBudgetBytes: Int?) {
+        self.downloadBudgetBytes = downloadBudgetBytes
+    }
+
+    public var budgetRemaining: Int? {
+        guard let b = downloadBudgetBytes else { return 0 }
+        return max(0, b - downloadedBytes)
+    }
+
+    /// Writes an asset's original to `destination`.
+    ///
+    /// Tries strictly offline first. Only if that fails does it consider the
+    /// network, and only while the budget holds — so a run can never quietly
+    /// pull hundreds of gigabytes down from iCloud.
+    public func export(
+        resource: PHAssetResource,
+        to destination: URL
+    ) async throws -> ExportResult {
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+
+        do {
+            try await write(resource, to: destination, allowNetwork: false)
+            let size = fileSize(destination)
+            return ExportResult(url: destination, byteCount: size, wasDownloaded: false)
+        } catch {
+            // Not on disk. Fall through to the metered network path.
+        }
+
+        try? FileManager.default.removeItem(at: destination)
+
+        guard let budget = downloadBudgetBytes else {
+            throw PhotoLibraryError.resourceUnavailableLocally
+        }
+        guard downloadedBytes < budget else {
+            throw PhotoLibraryError.resourceUnavailableLocally
+        }
+
+        try await write(resource, to: destination, allowNetwork: true)
+        let size = fileSize(destination)
+        downloadedBytes += size
+        return ExportResult(url: destination, byteCount: size, wasDownloaded: true)
+    }
+
+    private func fileSize(_ url: URL) -> Int {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int) ?? 0
+    }
+
+    private func write(_ resource: PHAssetResource, to destination: URL, allowNetwork: Bool) async throws {
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = allowNetwork
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            PHAssetResourceManager.default().writeData(
+                for: resource,
+                toFile: destination,
+                options: options
+            ) { error in
+                if let error { cont.resume(throwing: error) } else { cont.resume() }
+            }
+        }
+    }
+}
