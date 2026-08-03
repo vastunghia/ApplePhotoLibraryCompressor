@@ -23,13 +23,32 @@ struct Scan: AsyncParsableCommand {
     var verbose: Bool = false
 
     func run() async throws {
+        let census = try await Self.census(album: album, verbose: verbose)
+        Self.report(census, album: album)
+
+        if census.eligible > 0 {
+            print("""
+
+                Next: aplc calibrate --album "\(album)" --out ./staging
+                """)
+        }
+    }
+
+    struct Census {
+        var total = 0
+        var eligible = 0
+        var skips: [SkipReason: Int] = [:]
+    }
+
+    /// Shared with `convert`, which needs the counts rather than the printout —
+    /// the same split as `Verify.verify`, and for the same reason: one census,
+    /// two callers, no second implementation to drift.
+    static func census(album: String, verbose: Bool = false) async throws -> Census {
         try await PhotoLibraryAccess.authorize()
         let collection = try PhotoLibraryAccess.findAlbum(titled: album)
         let assets = PhotoLibraryAccess.imageAssets(in: collection)
 
-        var eligible = 0
-        var skips: [SkipReason: Int] = [:]
-
+        var census = Census(total: assets.count)
         for asset in assets {
             let traits = PhotoLibraryAccess.traits(for: asset)
             // Downloads are assumed allowed here so that iCloud-only originals
@@ -39,34 +58,30 @@ struct Scan: AsyncParsableCommand {
             )
             switch outcome {
             case .eligible:
-                eligible += 1
+                census.eligible += 1
                 if verbose { print("  eligible  \(traits.originalFilename)") }
             case .skip(let reason):
-                skips[reason, default: 0] += 1
+                census.skips[reason, default: 0] += 1
                 if verbose { print("  skip      \(traits.originalFilename)  (\(reason.rawValue))") }
             }
         }
+        return census
+    }
 
+    static func report(_ census: Census, album: String) {
         print("\nAlbum \"\(album)\"")
         print(Format.table([
-            ("images in album", "\(assets.count)"),
-            ("convertible", "\(eligible)"),
-            ("not convertible", "\(assets.count - eligible)"),
+            ("images in album", "\(census.total)"),
+            ("convertible", "\(census.eligible)"),
+            ("not convertible", "\(census.total - census.eligible)"),
         ]))
 
-        if !skips.isEmpty {
+        if !census.skips.isEmpty {
             print("\nWhy the rest are excluded")
-            let rows = skips
+            let rows = census.skips
                 .sorted { $0.value > $1.value }
                 .map { ("\($0.key.rawValue)", "\($0.value)  — \($0.key.explanation)") }
             print(Format.table(rows))
-        }
-
-        if eligible > 0 {
-            print("""
-
-                Next: aplc calibrate --album "\(album)" --out ./staging
-                """)
         }
     }
 }

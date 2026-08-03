@@ -35,6 +35,11 @@ struct Apply: AsyncParsableCommand {
     @Option(help: "Apply at most this many assets.")
     var limit: Int?
 
+    // Set by `convert`. Only affects wording: inside the chain the command to
+    // re-run is `convert`, not `apply`.
+    @Flag(name: .customLong("chained"), help: .hidden)
+    var chained: Bool = false
+
     func run() async throws {
         // Gate one: staged files must pass an independent re-check.
         let report = try Verify.verify(staging: staging, gate: gate)
@@ -70,10 +75,10 @@ struct Apply: AsyncParsableCommand {
         ]))
 
         guard confirm else {
-            print("""
-
-                Dry run — nothing was written. Re-run with --confirm to create these assets.
-                """)
+            let rerun = chained
+                ? "Re-run without --dry-run to create these assets."
+                : "Re-run with --confirm to create these assets."
+            print("\nDry run — nothing was written. \(rerun)")
             return
         }
 

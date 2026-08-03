@@ -47,8 +47,11 @@ copies and leaves deletion to you, in Photos.app.
   the originals. With iCloud Photos on, they are also uploaded.
 - **Every conversion must pass a gate** — anything questionable is skipped with a
   recorded reason, never converted approximately.
-- **`apply` is a dry run unless you pass `--confirm`**, refuses to start if
-  `verify` reports a problem, and is idempotent via the ledger.
+- **Two commands can write, and both refuse to start if `verify` reports a
+  problem.** `apply` is a dry run unless you pass `--confirm`; `convert`, the
+  one-shot pipeline, treats being invoked as the confirmation and takes
+  `--dry-run` instead. Both are idempotent via the ledger, and neither can do
+  anything but add.
 - **Everything is journalled** to an append-only, `fsync`ed JSONL ledger before
   any library write.
 
@@ -157,7 +160,15 @@ and the ledger still records what each new asset was meant to carry.
 
 ## Use
 
-Create an album in Photos.app holding the photos you want to convert, then:
+Create an album in Photos.app holding the photos you want to convert, then either
+run the whole pipeline at once:
+
+```sh
+aplc convert --album "My Album" --out ./staging --dest-album "Converted" --dry-run
+aplc convert --album "My Album" --out ./staging --dest-album "Converted" --limit 3
+```
+
+or drive it a step at a time, which is the same work with a pause after each:
 
 ```sh
 aplc scan      --album "My Album"
@@ -168,7 +179,16 @@ aplc apply     --album "My Album" --out ./staging --dest-album "Converted"   # d
 aplc apply     --album "My Album" --out ./staging --dest-album "Converted" --confirm --limit 3
 ```
 
-Only the last line writes anything, and even it only adds.
+`convert` runs scan → transcode → verify → apply and stops before writing if the
+album holds nothing convertible, if the gate rejected everything, or if `verify`
+finds a problem. It is safe to re-run: transcoding resumes where it left off and
+nothing is imported twice.
+
+**`convert` writes without asking**, unlike `apply`. The flag exists to separate
+exploring from intending, and `convert` is the intending — you type it because
+you want the copies, and by the time it writes you have already spent the
+transcoding time. `--dry-run` is how you hold it back. Either way nothing is ever
+deleted: the worst case is copies in `--dest-album` that you remove by hand.
 
 Two steps stay manual, in Photos.app, in this order:
 
@@ -188,10 +208,11 @@ aplc calibrate --out ./staging --files photo1.jpg photo2.jpg
 
 ### Quality is chosen per photo, by `transcode`
 
-This happens in the **`aplc transcode`** step — the third line above. `--quality`
-is optional there, and *omitting it is what asks for the search*: each photo then
-gets the **cheapest encoder setting that still reaches `--min-ssim`** (default
-0.97), found by encoding it and measuring, not by guessing.
+This happens in the **`aplc transcode`** step — the third line above, or step 2
+of `convert`. `--quality` is optional there, and *omitting it is what asks for
+the search*: each photo then gets the **cheapest encoder setting that still
+reaches `--min-ssim`** (default 0.97), found by encoding it and measuring, not by
+guessing.
 
 This inverts the usual arrangement. Normally you pick a quality up front and SSIM
 is a veto applied afterwards, which throws the work away when it fails and

@@ -31,6 +31,11 @@ struct Transcode: AsyncParsableCommand {
     @Option(help: "Stop after this many assets.")
     var limit: Int?
 
+    // Set by `convert`, which runs the next step itself. Hidden because it says
+    // nothing about what the command does — only about who is calling it.
+    @Flag(name: .customLong("chained"), help: .hidden)
+    var chained: Bool = false
+
     func run() async throws {
         guard Transcoder.canWriteHEIC else {
             throw ValidationError("this system's ImageIO cannot write HEIC")
@@ -271,11 +276,10 @@ struct Transcode: AsyncParsableCommand {
                 .map { ("\($0.key.rawValue)", "\($0.value)  — \($0.key.explanation)") }))
         }
 
-        print("""
-
-            Nothing has been written to your photo library.
-            Next: aplc verify --out \(staging.out)
-            """)
+        print("\nNothing has been written to your photo library.")
+        if !chained {
+            print("Next: aplc verify --out \(staging.out)")
+        }
     }
 
     /// Where the next search should start: the middle of what this album has
