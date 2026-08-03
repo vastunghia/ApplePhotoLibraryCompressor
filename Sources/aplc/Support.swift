@@ -14,17 +14,28 @@ struct StagingOptions: ParsableArguments {
 }
 
 struct GateOptions: ParsableArguments {
-    // ImageIO quantises this into buckets rather than honouring every value —
-    // 0.65 and 0.70 produce byte-identical output, as do 0.80 and 0.85. Above
-    // about 0.95 the HEIC grows larger than the JPEG it came from, which the
-    // insufficientSaving check then rejects.
-    @Option(help: "HEIC lossy compression quality, 0.0 to 1.0.")
-    var quality: Double = 0.8
+    // Deliberately without a default: omitting it selects the automatic search,
+    // which picks a quality per asset to meet --min-ssim. Giving this a default
+    // would make the manual path the silent one, and a default that the search
+    // then overrode would be worse still — an option that appears to control the
+    // output while doing nothing.
+    //
+    // ImageIO quantises the value into buckets rather than honouring every one:
+    // see QualityLadder for the measured rungs. Anything between them rounds
+    // down, so 0.80 and 0.85 give byte-identical files.
+    @Option(help: "HEIC quality, 0.0 to 1.0. Omit to choose it per photo from --min-ssim.")
+    var quality: Double?
 
     // 0.97 rather than something stricter: on real library photos q=0.8 lands
     // around 0.984 mean SSIM with outliers near 0.97, so a higher bar rejects
     // perfectly good conversions. Use `calibrate` to set this from your own set.
-    @Option(name: .customLong("min-ssim"), help: "Reject conversions scoring below this SSIM.")
+    //
+    // In automatic mode this stops being a veto and becomes the objective — the
+    // search returns the cheapest rung reaching it. The gate still checks it,
+    // which is then a tautology; that is intentional, since the gate is also
+    // what `verify` re-runs later against files it did not encode.
+    @Option(name: .customLong("min-ssim"),
+            help: "Target SSIM: the fidelity every converted photo must reach.")
     var minSSIM: Double = 0.97
 
     @Option(name: .customLong("max-size-ratio"),

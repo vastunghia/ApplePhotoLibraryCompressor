@@ -69,6 +69,10 @@ never taken at its word.
 | HEIC ≤ 90% of the JPEG | conversions that do not pay for themselves |
 | SSIM ≥ `--min-ssim` | visually degraded conversions |
 
+The last one is also what the quality search targets, so in automatic mode it is
+satisfied by construction. It stays in the gate regardless, because `verify`
+re-runs these checks later against files it did not encode.
+
 ### Metadata carried across
 
 PhotoKit exposes exactly five writable properties on an asset — `creationDate`,
@@ -158,7 +162,7 @@ Create an album in Photos.app holding the photos you want to convert, then:
 ```sh
 aplc scan      --album "My Album"
 aplc calibrate --album "My Album" --out ./staging
-aplc transcode --album "My Album" --out ./staging --quality 0.8
+aplc transcode --album "My Album" --out ./staging   # no --quality: chosen per photo
 aplc verify    --out ./staging
 aplc apply     --album "My Album" --out ./staging --dest-album "Converted"   # dry run
 aplc apply     --album "My Album" --out ./staging --dest-album "Converted" --confirm --limit 3
@@ -182,19 +186,53 @@ with while leaving your copies personal.
 aplc calibrate --out ./staging --files photo1.jpg photo2.jpg
 ```
 
-### Choosing a quality
+### Quality is chosen per photo, by `transcode`
 
-Use `calibrate` and look at the files; do not trust the numbers alone. Two
-behaviours of Apple's encoder are worth knowing:
+This happens in the **`aplc transcode`** step — the third line above. `--quality`
+is optional there, and *omitting it is what asks for the search*: each photo then
+gets the **cheapest encoder setting that still reaches `--min-ssim`** (default
+0.97), found by encoding it and measuring, not by guessing.
 
-- **Quality is quantised into buckets.** 0.65 and 0.70 produce byte-identical
-  output, as do 0.80 and 0.85.
-- **Above roughly 0.95 the HEIC becomes larger than the JPEG.** At quality 1.0 it
-  can be more than twice the size. The gate rejects these as
-  `insufficientSaving`.
+This inverts the usual arrangement. Normally you pick a quality up front and SSIM
+is a veto applied afterwards, which throws the work away when it fails and
+silently overpays when it succeeds by a wide margin. Here SSIM is the objective
+and quality is only the means, so what you state is the thing you actually care
+about: *this much fidelity, at the smallest size that delivers it*.
 
-Measured on real library photos at quality 0.8: around 62% smaller, mean SSIM
-0.984. A very high saving usually means visible loss somewhere in the set.
+The search is possible because Apple's encoder is not continuous. Measured by
+encoding one image at every hundredth from 0.40 to 1.00 and hashing the results,
+61 values collapse to **26 distinct files** — and two images of different size,
+aspect and content produced identical boundaries, so the quantisation belongs to
+the encoder, not the picture. `aplc` therefore searches a ladder of 20 real
+rungs rather than a continuum, bisecting it and starting from the rung the
+previous photos in the album needed. Typically **two to three encodes per photo**.
+
+Consequences worth knowing:
+
+- **Values between rungs round down.** `--quality 0.85` encodes exactly as 0.79
+  does; `transcode` reports the rung it really used, not the number you typed.
+- **Above roughly 0.95 the HEIC becomes larger than the JPEG** — at quality 1.0
+  more than twice the size — so the ladder stops below that. The gate would
+  reject those as `insufficientSaving` anyway.
+- **A photo no rung can satisfy is skipped**, exactly as before. The difference
+  is that the skip now means *no quality would have worked*, not *the one you
+  chose did not*.
+
+On one set of photographs, targeting SSIM 0.97 against a fixed `--quality 0.8`:
+
+| | saved | SSIM range |
+|---|---|---|
+| fixed 0.80 | 77.1% | 0.9735 – 0.9805 |
+| automatic, target 0.97 | **82.6%** | 0.9703 – 0.9735 |
+
+The fixed setting was overshooting the bar it had been given, and paying for it
+in bytes. Where both happened to pick the same rung, they produced the identical
+file.
+
+Passing `--quality` explicitly still works and is the way to reproduce an old
+run. Either way, use `calibrate` and **look at the files**: a target that reads
+well as a number can still be visibly wrong on your own photographs, and SSIM
+does not know what the picture is of.
 
 ### iCloud
 
@@ -210,13 +248,14 @@ Sources/APLCCore/          testable core
   ImageProbe.swift         structural + metadata facts about an image file
   Transcoder.swift         JPEG -> HEIC preserving metadata and gain map
   QualityMetrics.swift     SSIM and PSNR, strip-processed to bound memory
+  QualitySearch.swift      the encoder's real quality rungs, and the search
   EligibilityGate.swift    the eight checks, as pure functions
   Ledger.swift             append-only journal, SHA-256 digests
   PhotoLibraryAccess.swift authorisation, album lookup, metered export
   PhotosScripting.swift    Apple Events for keywords, title and caption
   Importer.swift           the only code that writes assets to the library
 Sources/aplc/              CLI subcommands
-Tests/APLCCoreTests/       61 tests, no photo library required
+Tests/APLCCoreTests/       73 tests, no photo library required
 ```
 
 ## Tests
@@ -240,7 +279,9 @@ photos to those of everyone you share with.
 ## Known limitations
 
 - Sequential; no parallelism across assets yet. SSIM at full resolution costs
-  roughly 1–2 s per photo.
+  roughly 1–2 s per photo, and the quality search spends two or three of those
+  per photo instead of one. Passing `--quality` explicitly skips the search when
+  the time matters more than the bytes.
 - `verify` re-checks structure and hashes from the ledger. It does not re-export
   originals to recompute SSIM from scratch.
 - **Photos only.** In a library that holds much video, transcoding H.264 to HEVC

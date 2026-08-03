@@ -67,7 +67,10 @@ struct Transcode: AsyncParsableCommand {
         let budget = allowDownloads ? Int(maxDownloadGB * 1_073_741_824) : nil
         let exporter = OriginalExporter(downloadBudgetBytes: budget)
         let policy = gate.policy(allowDownloads: allowDownloads)
-        let transcoder = Transcoder(quality: gate.quality)
+        let search = QualitySearch(targetSSIM: gate.minSSIM)
+        if gate.quality == nil {
+            print("Choosing quality per photo to reach SSIM \(gate.minSSIM).")
+        }
 
         var processed = 0
         var converted = 0
@@ -75,6 +78,10 @@ struct Transcode: AsyncParsableCommand {
         var sourceBytes = 0
         var heicBytes = 0
         var skips: [SkipReason: Int] = [:]
+        // Rungs already chosen in this album, used to seed the next search.
+        var chosenRungs: [Int] = []
+        var probes = 0
+        var searched = 0
 
         for asset in assets {
             if let limit, processed >= limit { break }
@@ -135,10 +142,44 @@ struct Transcode: AsyncParsableCommand {
                 let assetText = textMetadata[asset.localIdentifier]
                 let keywordsToEmbed = textMetadataAvailable ? (assetText?.keywords ?? []) : nil
 
-                let result = try transcoder.transcode(
-                    source: exportedURL, destination: heicURL, keywords: keywordsToEmbed
-                )
-                let score = try QualityMetrics.compare(exportedURL, heicURL)
+                let result: TranscodeResult
+                let score: QualityScore
+
+                if let fixedQuality = gate.quality {
+                    result = try Transcoder(quality: fixedQuality).transcode(
+                        source: exportedURL, destination: heicURL, keywords: keywordsToEmbed
+                    )
+                    score = try QualityMetrics.compare(exportedURL, heicURL)
+                } else {
+                    let found = try search.search(
+                        source: exportedURL,
+                        destination: heicURL,
+                        keywords: keywordsToEmbed,
+                        seedIndex: Self.median(of: chosenRungs)
+                    )
+                    probes += found.probes
+                    searched += 1
+
+                    guard let accepted = found.accepted else {
+                        // Not even the top rung reached the target. Skipping is
+                        // the same answer as before; the search only means we
+                        // now know no quality would have worked.
+                        skips[.qualityBelowThreshold, default: 0] += 1
+                        try ledger.append(LedgerEntry(
+                            outcome: .skipped,
+                            sourceLocalIdentifier: traits.localIdentifier,
+                            originalFilename: traits.originalFilename,
+                            skipReason: .qualityBelowThreshold,
+                            quality: QualityLadder.rungs.last,
+                            ssim: found.bestSSIM
+                        ))
+                        continue
+                    }
+                    chosenRungs.append(accepted.rungIndex)
+                    result = accepted.result
+                    score = accepted.score
+                }
+
                 let outcome = EligibilityGate.evaluatePostConditions(
                     source: result.sourceFacts,
                     destination: result.destinationFacts,
@@ -157,7 +198,7 @@ struct Transcode: AsyncParsableCommand {
                         skipReason: reason,
                         sourceBytes: result.sourceBytes,
                         stagedBytes: result.destinationBytes,
-                        quality: gate.quality,
+                        quality: result.quality,
                         ssim: score.ssim,
                         psnr: score.psnr.isFinite ? score.psnr : nil
                     ))
@@ -178,7 +219,7 @@ struct Transcode: AsyncParsableCommand {
                     stagedSHA256: try? Digest.sha256(of: heicURL),
                     sourceBytes: result.sourceBytes,
                     stagedBytes: result.destinationBytes,
-                    quality: gate.quality,
+                    quality: result.quality,
                     ssim: score.ssim,
                     psnr: score.psnr.isFinite ? score.psnr : nil,
                     sourceFacts: result.sourceFacts,
@@ -186,11 +227,12 @@ struct Transcode: AsyncParsableCommand {
                     sourceTextMetadata: assetText
                 ))
 
-                print(String(format: "  %@  %@ -> %@  (%@ saved, SSIM %.4f)",
+                print(String(format: "  %@  %@ -> %@  (%@ saved, q=%.2f, SSIM %.4f)",
                              traits.originalFilename,
                              Format.bytes(result.sourceBytes),
                              Format.bytes(result.destinationBytes),
                              Format.percent(result.savedFraction),
+                             result.quality,
                              score.ssim))
             } catch {
                 try? FileManager.default.removeItem(at: heicURL)
@@ -209,6 +251,8 @@ struct Transcode: AsyncParsableCommand {
         print(Format.table([
             ("examined", "\(processed)"),
             ("staged for conversion", "\(converted)"),
+            ("quality", Self.qualitySummary(gate.quality, chosenRungs: chosenRungs,
+                                            probes: probes, searched: searched)),
             ("carrying keywords/title/caption", textMetadataAvailable
                 ? "\(withText)"
                 : "unknown — Photos was unreachable"),
@@ -232,6 +276,32 @@ struct Transcode: AsyncParsableCommand {
             Nothing has been written to your photo library.
             Next: aplc verify --out \(staging.out)
             """)
+    }
+
+    /// Where the next search should start: the middle of what this album has
+    /// needed so far. `nil` for the first asset, which has nothing to learn from.
+    static func median(of rungs: [Int]) -> Int? {
+        guard !rungs.isEmpty else { return nil }
+        return rungs.sorted()[rungs.count / 2]
+    }
+
+    static func qualitySummary(
+        _ fixed: Double?, chosenRungs: [Int], probes: Int, searched: Int
+    ) -> String {
+        if let fixed {
+            // Say what was encoded, not what was typed: the two differ whenever
+            // the value falls between rungs.
+            let actual = QualityLadder.rung(containing: fixed)
+            return actual == fixed
+                ? String(format: "%.2f (fixed)", fixed)
+                : String(format: "%.2f (fixed; %.2f rounds down to it)", actual, fixed)
+        }
+        guard !chosenRungs.isEmpty else { return "chosen per photo — none converted" }
+        let qualities = chosenRungs.map { QualityLadder.rungs[$0] }
+        let mean = qualities.reduce(0, +) / Double(qualities.count)
+        return String(format: "%.2f–%.2f, mean %.2f  (%.1f encodes per photo)",
+                      qualities.min()!, qualities.max()!, mean,
+                      Double(probes) / Double(max(searched, 1)))
     }
 
     /// Assets already transcoded in an earlier run whose staged file survives.

@@ -29,8 +29,10 @@ struct Calibrate: AsyncParsableCommand {
     @Option(help: "How many assets to sample from the album.")
     var samples: Int = 30
 
+    // Every step is a distinct encoder bucket. The old default included both
+    // 0.80 and 0.85, which produce byte-identical files — a wasted column.
     @Option(parsing: .upToNextOption, help: "Quality steps to try.")
-    var steps: [Double] = [0.6, 0.7, 0.75, 0.8, 0.85, 0.9]
+    var steps: [Double] = [0.57, 0.65, 0.71, 0.76, 0.79, 0.86, 0.90]
 
     @Option(name: .customLong("max-download-gb"),
             help: "Ceiling on data pulled from iCloud, in GB. 0 refuses downloads.")
