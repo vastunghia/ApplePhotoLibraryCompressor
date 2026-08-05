@@ -47,11 +47,15 @@ copies and leaves deletion to you, in Photos.app.
   the originals. With iCloud Photos on, they are also uploaded.
 - **Every conversion must pass a gate** — anything questionable is skipped with a
   recorded reason, never converted approximately.
-- **Two commands can write, and both refuse to start if `verify` reports a
-  problem.** `apply` is a dry run unless you pass `--confirm`; `convert`, the
+- **Two commands can create assets, and both refuse to start if `verify` reports
+  a problem.** `apply` is a dry run unless you pass `--confirm`; `convert`, the
   one-shot pipeline, treats being invoked as the confirmation and takes
   `--dry-run` instead. Both are idempotent via the ledger, and neither can do
   anything but add.
+- **A third command, `select`, writes only album membership** — it puts existing
+  photos into an album, which touches no photo and loses nothing. It is still a
+  one-way door, because taking a photo back out of an album needs a call this
+  tool does not contain; a wrong month is undone by hand in Photos.app.
 - **Everything is journalled** to an append-only, `fsync`ed JSONL ledger before
   any library write.
 
@@ -160,8 +164,14 @@ and the ledger still records what each new asset was meant to carry.
 
 ## Use
 
-Create an album in Photos.app holding the photos you want to convert, then either
-run the whole pipeline at once:
+Everything works on an album. Make one in Photos.app holding the photos you want
+to convert, or let `select` build it from a month of your library:
+
+```sh
+aplc select --year 2019 --month 7 --album "July 2019 to convert"
+```
+
+Then either run the whole pipeline at once:
 
 ```sh
 aplc convert --album "My Album" --out ./staging --dest-album "Converted" --dry-run
@@ -171,6 +181,7 @@ aplc convert --album "My Album" --out ./staging --dest-album "Converted" --limit
 or drive it a step at a time, which is the same work with a pause after each:
 
 ```sh
+aplc select    --year 2019 --month 7 --album "My Album"
 aplc scan      --album "My Album"
 aplc calibrate --album "My Album" --out ./staging
 aplc transcode --album "My Album" --out ./staging   # no --quality: chosen per photo
@@ -205,6 +216,54 @@ with while leaving your copies personal.
 ```sh
 aplc calibrate --out ./staging --files photo1.jpg photo2.jpg
 ```
+
+### Which photos are left to convert, by `select`
+
+A library too large to convert in one go has to be worked through in pieces, and
+the hard part of that is remembering where you stopped. **`aplc select`** answers
+it from the library itself, rather than from any record it keeps: it gathers the
+JPEGs of one month into an album, leaving out the ones it can already find a
+converted copy of.
+
+It can find them because `apply` gives every new HEIC its original's **filename
+stem** and its **exact creation date**. A converted JPEG therefore always has a
+matching HEIC sitting in the same month, and a single month's fetch sees both
+halves of the pair. Photos that were always HEIC pair with nothing, so they do not
+make their JPEG neighbours look converted.
+
+Both facts matter for what the answer survives. It does not depend on the staging
+folder, which you may delete; nor on the copies staying in `--dest-album`, which
+they will not once you move them into a Shared Library.
+
+That independence is the point, not a detail. The ledger that makes `apply`
+idempotent lives *inside* the staging folder, so it only knows about the
+conversions it watched: start a fresh one, point it at the same album, and you
+get a second HEIC of every photo. Asking the library instead is what spans the
+gap between one session and the next.
+
+```
+July 2019
+  photos in the month        412
+  already HEIC                86
+  JPEGs already converted     74
+  JPEGs still to convert     240
+  already in "July 2019"       0
+  added to "July 2019"       240
+
+Why the rest are excluded
+  notAJPEG        86  — original resource is not a JPEG
+  hasAdjustments  12  — the photo has edits that would be lost
+```
+
+Re-running adds only what is missing. There is no command to empty the album
+again — see [The safety model](#the-safety-model) — so check the month before you
+run it. This is also the only command that reads outside a named album, which it
+must in order to build one.
+
+Photos that reach you through an iCloud **Shared Album** are never offered, and
+should not be: what a shared album holds is a downscaled copy belonging to whoever
+posted it, not an original of yours to re-encode. Assets in a Shared *Library* are
+a different thing — those are full originals, and they are included.
 
 ### Quality is chosen per photo, by `transcode`
 
@@ -270,6 +329,7 @@ Sources/APLCCore/          testable core
   Transcoder.swift         JPEG -> HEIC preserving metadata and gain map
   QualityMetrics.swift     SSIM and PSNR, strip-processed to bound memory
   QualitySearch.swift      the encoder's real quality rungs, and the search
+  CandidateSelection.swift what a month still has left to convert
   EligibilityGate.swift    the eight checks, as pure functions
   Ledger.swift             append-only journal, SHA-256 digests
   PhotoLibraryAccess.swift authorisation, album lookup, metered export

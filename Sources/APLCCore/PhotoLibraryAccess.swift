@@ -66,7 +66,37 @@ public enum PhotoLibraryAccess {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        let result = PHAsset.fetchAssets(in: collection, options: options)
+        return materialise(PHAsset.fetchAssets(in: collection, options: options))
+    }
+
+    /// Every image in the library whose creation date falls in `range`.
+    ///
+    /// The one read that is not scoped to a named album. Scoping to an album is
+    /// this project's substitute for pointing at a scratch library, so widening
+    /// it is not done lightly — but an album of candidates cannot be built from
+    /// inside an album that does not exist yet. Reading only.
+    public static func imageAssets(createdIn range: Range<Date>) -> [PHAsset] {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(
+            format: "creationDate >= %@ AND creationDate < %@",
+            range.lowerBound as NSDate,
+            range.upperBound as NSDate
+        )
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        return materialise(PHAsset.fetchAssets(with: .image, options: options))
+    }
+
+    /// Local identifiers of the assets already in an album, so a re-run adds
+    /// only what is missing.
+    public static func identifiers(in collection: PHAssetCollection) -> Set<String> {
+        var identifiers: Set<String> = []
+        PHAsset.fetchAssets(in: collection, options: nil).enumerateObjects { asset, _, _ in
+            identifiers.insert(asset.localIdentifier)
+        }
+        return identifiers
+    }
+
+    private static func materialise(_ result: PHFetchResult<PHAsset>) -> [PHAsset] {
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
         result.enumerateObjects { asset, _, _ in assets.append(asset) }
@@ -103,7 +133,8 @@ public enum PhotoLibraryAccess {
             hasPairedVideoResource: resources.contains { $0.type == .pairedVideo || $0.type == .fullSizePairedVideo },
             hasAdjustmentBaseResource: resources.contains { adjustmentBaseTypes.contains($0.type) },
             isLocallyAvailable: true,
-            resourceByteCount: nil
+            resourceByteCount: nil,
+            creationDate: asset.creationDate
         )
     }
 }

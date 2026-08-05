@@ -12,9 +12,10 @@ struct Aplc: AsyncParsableCommand {
             the converted copies back as new assets in an album of their own.
             Removing the JPEG originals afterwards is left to you, in Photos.app.
 
-            Two commands write to the library, and both say so: `apply`, which
-            needs --confirm, and `convert`, where typing the command is the
-            confirmation and --dry-run is how you hold it back.
+            Three commands write to the library, and all three say so: `apply`,
+            which needs --confirm; `convert`, where typing the command is the
+            confirmation and --dry-run is how you hold it back; and `select`,
+            which only ever fills an album.
 
             The whole pipeline in one command, once you know you want the copies:
 
@@ -22,6 +23,7 @@ struct Aplc: AsyncParsableCommand {
 
             Or a step at a time, which is the same work with a pause after each:
 
+              aplc select    --year 2019 --month 7 --album "My Album"
               aplc scan      --album "My Album"
               aplc calibrate --album "My Album" --out ./staging
               aplc transcode --album "My Album" --out ./staging
@@ -30,10 +32,15 @@ struct Aplc: AsyncParsableCommand {
 
             Quality is chosen per photo, by `transcode`, to meet --min-ssim.
             Pass --quality to fix it by hand instead.
+
+            `select` stands before all of that: it builds the album to work on
+            from one month of photos, leaving out whatever it already finds a
+            converted copy of.
             """,
         version: "0.1.0",
         subcommands: [
-            Convert.self, Scan.self, Calibrate.self, Transcode.self, Verify.self, Apply.self,
+            Convert.self, Select.self, Scan.self, Calibrate.self,
+            Transcode.self, Verify.self, Apply.self,
         ]
     )
 }

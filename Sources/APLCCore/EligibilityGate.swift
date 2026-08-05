@@ -15,6 +15,9 @@ public struct AssetTraits: Sendable, Equatable {
     public var hasAdjustmentBaseResource: Bool
     public var isLocallyAvailable: Bool
     public var resourceByteCount: Int?
+    /// Only used to pair a JPEG with the HEIC made from it, which inherits this
+    /// value exactly. The gate itself never reads it.
+    public var creationDate: Date?
 
     public init(
         localIdentifier: String,
@@ -26,7 +29,8 @@ public struct AssetTraits: Sendable, Equatable {
         hasPairedVideoResource: Bool = false,
         hasAdjustmentBaseResource: Bool = false,
         isLocallyAvailable: Bool = true,
-        resourceByteCount: Int? = nil
+        resourceByteCount: Int? = nil,
+        creationDate: Date? = nil
     ) {
         self.localIdentifier = localIdentifier
         self.originalFilename = originalFilename
@@ -38,6 +42,7 @@ public struct AssetTraits: Sendable, Equatable {
         self.hasAdjustmentBaseResource = hasAdjustmentBaseResource
         self.isLocallyAvailable = isLocallyAvailable
         self.resourceByteCount = resourceByteCount
+        self.creationDate = creationDate
     }
 }
 

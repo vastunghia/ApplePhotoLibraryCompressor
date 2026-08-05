@@ -49,6 +49,20 @@ public enum Importer {
         return created
     }
 
+    /// Adds photos that are already in the library to an album.
+    ///
+    /// An album holds references, so this does not touch the photos themselves
+    /// and cannot lose anything. It is nonetheless a one-way door: the inverse
+    /// call is on the forbidden list in `SafetyInvariantTests`, so no command in
+    /// this tool can ever take a photo back out. Filling the wrong album is
+    /// undone by hand in Photos.app, and the CLI says so before it writes.
+    public static func add(_ assets: [PHAsset], to album: PHAssetCollection) async throws {
+        guard !assets.isEmpty else { return }
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetCollectionChangeRequest(for: album)?.addAssets(assets as NSArray)
+        }
+    }
+
     public enum ImportError: Error, CustomStringConvertible {
         case stagedFileNotHEIC(URL)
         case stagedFileMissing(URL)
