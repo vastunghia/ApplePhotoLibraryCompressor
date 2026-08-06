@@ -1,320 +1,111 @@
 # ApplePhotoLibraryCompressor (`aplc`)
 
-An open-source macOS CLI that converts JPEG originals in the Photos library to
-HEIC, built so that it **cannot destroy anything**: it only ever *creates*
-assets, never deletes or modifies existing ones.
+An open-source macOS command-line tool that re-encodes the JPEG originals in your
+Photos library as HEIC — reclaiming most of the space they take, at a fidelity
+you choose — and that **cannot delete or modify anything**, by construction and
+by test.
 
-Proof of concept. Read the safety model below before pointing it at anything you
-care about.
+You convert a month, look at the results in Photos.app, and delete the old JPEGs
+yourself. The tool never does that part.
 
-## Why this exists
+## Why you might want it
 
-Tools that promise this are typically iOS-only and closed-source, which is a poor
-combination for something that rewrites an irreplaceable photo library. This one
-is auditable, and its safety properties are enforced by tests rather than by
-promises.
+### The space
 
-## What macOS actually allows
+In most libraries the JPEG originals are the largest thing after video, and HEIC
+carries the same picture in a fraction of the bytes. `aplc` does not guess at a
+quality setting: for each photo it searches for the **cheapest encoder setting
+that still reaches the fidelity you asked for** (SSIM 0.97 by default), by
+encoding and measuring rather than by assuming.
 
-Three constraints shape the entire design. All three were verified against the
-SDK and the running system, not assumed:
+That is not a detail — it is where the saving comes from. On one set of
+photographs, compared with a fixed `--quality 0.8`:
 
-1. **PhotoKit cannot replace an asset's original.** `PHAssetChangeRequest`
-   exposes only `creationDate`, `location`, `favorite`, `hidden` and
-   `contentEditingOutput`. That last one writes a *derived rendition* while
-   keeping the original — which is why `revertAssetContentToOriginal` exists, and
-   why using it would make the library **grow**. The only way to reclaim space is
-   create-new + delete-old.
+| | space saved | SSIM range |
+|---|---|---|
+| fixed quality 0.80 | 77.1% | 0.9735 – 0.9805 |
+| automatic, target 0.97 | **82.6%** | 0.9703 – 0.9735 |
 
-2. **AVIF cannot be written.** `CGImageDestinationCopyTypeIdentifiers()` does not
-   list `public.avif`; `CGImageSourceCopyTypeIdentifiers()` does. macOS reads
-   AVIF but has no encoder for it. HEIC is the only modern option without
-   bundling a third-party encoder.
+The fixed setting was overshooting the bar it had been given, and paying for it
+in bytes. Your own photographs will differ; `aplc calibrate` lets you see the
+trade-off on them before you commit.
 
-3. **Only the System Photo Library is reachable.** `PHPhotoLibrary` has no
-   URL-based initialiser. Isolation therefore has to come from restricting work
-   to a named album, not from pointing the tool at a scratch library.
+### It cannot destroy anything
 
-## The safety model
+- **It only ever *creates*.** New assets, new albums, new folders. That is all
+  the code can do.
+- **The destructive PhotoKit calls appear nowhere in `Sources/`** —
+  `deleteAssets`, `removeAssets`, `contentEditingOutput`,
+  `revertAssetContentToOriginal`, and the private shared-library API that could
+  reach photos belonging to people you share with. `SafetyInvariantTests` greps
+  the sources on every `swift test` and fails the build if one appears.
+- **Every conversion must pass a gate.** Edited photos, Live Photos, HDR photos
+  that would lose their gain map, anything that loses metadata or fails the
+  fidelity target — all skipped, with a recorded reason, never converted
+  approximately.
+- **Deletion is yours, in Photos.app.** The tool gathers the JPEGs it replaced
+  into one album so it is a single gesture, and stops there.
+- **So your library grows before it shrinks.** Copies are added alongside the
+  originals, and with iCloud Photos on they are uploaded too.
 
-`aplc` deliberately stops one step short of reclaiming space: it adds converted
-copies and leaves deletion to you, in Photos.app.
+None of that is a guarantee about your library — please read the
+[Disclaimer](#disclaimer) before you point this at photos you care about.
 
-- **`PHAssetChangeRequest.deleteAssets` does not appear in the source.** Neither
-  does `contentEditingOutput` or `revertAssetContentToOriginal`.
-  `SafetyInvariantTests` greps the sources on every test run to keep it so.
-- **Your library grows before it shrinks.** Converted copies are added alongside
-  the originals. With iCloud Photos on, they are also uploaded.
-- **Every conversion must pass a gate** — anything questionable is skipped with a
-  recorded reason, never converted approximately.
-- **Two commands can create assets, and both refuse to start if `verify` reports
-  a problem.** `apply` is a dry run unless you pass `--confirm`; `convert`, the
-  one-shot pipeline, treats being invoked as the confirmation and takes
-  `--dry-run` instead. Both are idempotent — and idempotent against the
-  *library*, not against their own journal — and neither can do anything but
-  add.
-- **In month mode every command writes album membership** — putting existing
-  photos into `Selected Originals`, which touches no photo and loses nothing.
-  `scan` and `calibrate` are therefore not read-only with `--year`/`--month`;
-  `--album` is the form that reads and writes nothing. It is still a one-way
-  door, because taking a photo back out of an album needs a call this tool does
-  not contain; a wrong month is undone by hand in Photos.app.
-- **It gathers what you may delete; it never deletes it.** `apply` collects each
-  replaced JPEG into `Compressed Originals` so the last step is one gesture, but
-  that step stays yours and stays in Photos.app.
-- **The albums and folders are one-way too.** `select` and `apply` create the
-  workspace folders as they need them, and nothing here can unmake one:
-  `deleteCollectionLists` and `removeChildCollections` are on the same forbidden
-  list as `deleteAssets`. Tidying the sidebar is your job, in Photos.app.
-- **A copy is never imported twice.** Before creating an asset, `apply` asks the
-  library — not its own ledger — whether a HEIC with that filename and that
-  capture second is already there. See
-  [Duplicates are refused at the door](#duplicates-are-refused-at-the-door).
-- **Everything is journalled** to an append-only, `fsync`ed JSONL ledger before
-  any library write. It lives outside the working directory and outlives every
-  run: `~/Library/Application Support/aplc/aplc_ledger.jsonl`.
+### Open source, so you can check
 
-### The gate
+The tools that promise this are typically iOS-only and closed-source, which is a
+poor combination for something that rewrites an irreplaceable photo library. You
+are asked to trust a binary with the one collection you cannot recreate.
 
-An asset is converted only if it passes all of these. Checks 4–8 are
-post-conditions, re-read off the HEIC that was actually written — the encoder is
-never taken at its word.
-
-| Check | Rejects |
-|---|---|
-| Original resource is `public.jpeg` | anything else |
-| `hasAdjustments == false`, no adjustment-base resource | edited photos, whose edit history cannot be carried over |
-| Not a Live Photo or burst member | assets whose paired resources would be lost |
-| Gain map preserved | HDR photos that would lose their gain map |
-| EXIF / GPS / TIFF / ICC profile preserved | any metadata loss |
-| Pixel dimensions unchanged | any geometry change |
-| HEIC ≤ 90% of the JPEG | conversions that do not pay for themselves |
-| SSIM ≥ `--min-ssim` | visually degraded conversions |
-
-The last one is also what the quality search targets, so in automatic mode it is
-satisfied by construction. It stays in the gate regardless, because `verify`
-re-runs these checks later against files it did not encode.
-
-### Metadata carried across
-
-PhotoKit exposes exactly five writable properties on an asset — `creationDate`,
-`location`, `favorite`, `hidden`, `contentEditingOutput` — so it alone cannot
-carry text metadata. Photos.app's scripting interface can: its dictionary marks
-`keywords`, `name` (title) and `description` (caption) as read-write on
-`media item`, and maps `id` to the same `localIdentifier` the ledger records.
-
-So **keywords, title and caption are transferred**, then read back to confirm
-they stuck. Keywords are additionally embedded in the HEIC as IPTC, which keeps
-them with the file outside Photos.
-
-> One subtlety worth knowing: originals in a real library carry **stale** XMP
-> `dc:subject` from old export cycles that disagrees with what Photos holds. aplc
-> therefore always writes the authoritative keyword set, including an empty one,
-> so old tags cannot come back from the dead.
-
-### What still cannot be carried over
-
-**People assignments.** No supported route exists: PhotoKit has no API, and
-Photos' AppleScript dictionary has no person or face class at all. In practice
-this matters less than it sounds — Photos assigns faces by recognition rather
-than by hand, so the same face in the converted copy is re-assigned on its own
-once analysis runs. (On the library this was developed against, only eighteen
-face-to-person links out of many thousands had been made by hand — everything
-else came from recognition, and recognition is exactly what runs again on the
-copy.)
-
-This has been confirmed in the field on converted HEICs, with one caveat worth
-knowing: `photoanalysisd` only works while the Mac is **idle**, so recognition
-does not happen at import time. Checked too early, a converted copy shows no
-detected faces at all and looks like a failure; left idle for a while, the people
-appear. Judge it after some idle time, not immediately after `apply`.
-
-**iCloud Shared Photo Library membership.** A converted copy is always created in
-your **personal** library, even when the original was in the shared one. Measured
-on the library this was developed against: 6 of 6 copies came out personal while
-all their originals were shared.
-
-There is no supported way to set it. The public headers expose nothing,
-`PHAssetCreationRequest` has no scope setter, and Photos' AppleScript dictionary
-does not know the concept. Private API does exist — `PHLibraryScopeChangeRequest`
-— and `aplc` deliberately does not use it, because the same class also exposes
-`trashLibraryScopes:` and `expungeLibraryScopes:`, which act on an *entire* shared
-library and so would reach the other participants' photos. Those symbols are in
-`SafetyInvariantTests`' forbidden list, so the choice is enforced rather than
-merely intended.
-
-> This matters most at deletion time, which is the step `aplc` leaves to you:
-> deleting a shared original removes it **for everyone it was shared with**, while
-> your converted copy remains personal. If the originals are shared, move the
-> copies into the Shared Library in Photos.app *before* deleting anything.
-
-**Edit history** and the original **date added** are likewise not transferable,
-and assets with edits are refused by the gate for exactly that reason.
+Here the safety properties are not promises: they are
+[tests you can run](Tests/APLCCoreTests/SafetyInvariantTests.swift), on code you
+can read. [`TECHNICAL.md`](TECHNICAL.md) documents what the tool does and why,
+including what it deliberately refuses to do.
 
 ## Requirements
 
-macOS 14+, Swift 6. Built against the macOS 26 SDK but deliberately targeting
-macOS 14, so that macOS 26-only APIs (`PHAsset.contentType`, `addedDate`,
-`PHAssetResourceCreationOptions.contentType`) fail to compile rather than
-crashing at runtime on macOS 15.
+macOS 14 or later, and the Swift 6 toolchain (Xcode or the Command Line Tools).
 
-## Install
+**Tested so far only on macOS 15.7.** It is built against the macOS 26 SDK while
+targeting macOS 14, so newer APIs cannot slip in and crash on older systems — but
+if you are on macOS 14 or macOS 26, you are the first to run it there. Start
+small.
+
+## Setup
 
 ```sh
-swift build -c release          # always use release: SSIM is compute-heavy
+git clone https://github.com/vastunghia/ApplePhotoLibraryCompressor.git
+cd ApplePhotoLibraryCompressor
+swift build -c release            # release always: measuring fidelity is compute-heavy
 cp .build/release/aplc /usr/local/bin/
 ```
 
-The executable embeds an `Info.plist` in its `__TEXT` segment via linker flags.
-Without it, TCC finds no usage description and kills the process on first access.
-Consent is attributed to the **terminal** running it, and two separate grants are
-needed:
+macOS will ask for permission the first time you run it. Two separate grants are
+involved, in System Settings → Privacy & Security, and they are attributed to the
+**terminal application** you run `aplc` from:
 
-- System Settings → Privacy & Security → **Photos** — to read and add assets.
-- System Settings → Privacy & Security → **Automation** → your terminal →
-  **Photos** — to carry keywords, title and caption across.
+- **Photos** — required, to read your photos and add the copies.
+- **Automation → your terminal → Photos** — optional, and only used to carry
+  keywords, titles and captions across. Without it the conversion runs anyway and
+  tells you what it could not carry.
 
-Only the first is required. Without the second, conversion proceeds and says so,
-and the ledger still records what each new asset was meant to carry.
-
-## Use
-
-Work through the library a month at a time. One command does all of it:
+## Use it, one month at a time
 
 ```sh
-aplc convert --year 2019 --month 7 --dry-run
-aplc convert --year 2019 --month 7 --limit 3
+aplc convert --year 2019 --month 7 --dry-run   # see what it would do
+aplc convert --year 2019 --month 7             # do it
 ```
 
-There is no preparatory step. Every command that takes `--year` and `--month`
-begins by gathering that month's unconverted JPEGs into `Selected Originals`,
-which is the work `select` does — so `select` is now only worth typing when you
-want to see that step on its own.
+That is the whole tool. There is no preparatory step: `convert` finds the
+month's JPEGs that have no converted copy yet, encodes them, re-checks every
+result, and only then adds the copies to your library. It stops before writing if
+the month has nothing left to do, if nothing passed the gate, or if a check
+fails. It is safe to re-run — nothing is ever imported twice.
 
-To look before converting:
+Start with `--limit 5` on a month you know well, and look at the results before
+converting the rest.
 
-```sh
-aplc scan      --year 2019 --month 7   # what is convertible, and why the rest is not
-aplc calibrate --year 2019 --month 7   # sample encodes at several qualities, to judge by eye
-```
-
-Every command also takes `--album "Some Album"` instead, for an album you made
-by hand; `apply` and `convert` take `--dest-album` to put the copies in one flat
-album rather than in the workspace. The two forms are alternatives — give one or
-the other.
-
-`convert` runs select → scan → transcode → verify → apply and stops before
-writing if the month has nothing left to convert, if the gate rejected
-everything, or if `verify` finds a problem. It is safe to re-run: nothing is
-imported twice.
-
-### Nothing is left on your disk
-
-Staged HEICs and exported originals go to a temporary directory that is removed
-when the run ends, whichever way it ends. There is no `--out`, and nothing to
-tidy up afterwards.
-
-The journal is the exception, and it is deliberate:
-
-```
-~/Library/Application Support/aplc/aplc_ledger.jsonl
-```
-
-Every run appends to it — what was converted, at what quality, to what SSIM, and
-which new asset each conversion became. That record is the point: a journal that
-died with a staging folder could not tell you that a photo had already been
-converted three months ago, and that is precisely how this library came to hold
-two and three HEIC copies of some photos.
-
-**The journal records; the library decides.** It is not consulted as an
-authority on what is converted, and this matters the moment you delete a copy:
-the journal goes on naming that conversion for ever, so on its own it would
-refuse to convert a photo whose HEIC you have since thrown away — while `select`,
-which asks the library, would keep offering it. Every entry names the asset it
-created, and that claim is checked against the library before it is allowed to
-stop any work. Delete every copy you have made and the tool will offer them all
-again, which is the right answer.
-
-It is read leniently. A line left half-written by a hard stop is skipped and
-counted, never allowed to make the file unreadable — the whole file is the only
-record there is, and refusing to start because of one damaged line would be the
-worse failure.
-
-`transcode`, `verify` and `apply` still exist as separate commands, but with
-staging thrown away between them they have nothing to hand one another; `convert`
-runs them all in one process, which is why it is the way in.
-
-**`convert` writes without asking**, unlike `apply`. The flag exists to separate
-exploring from intending, and `convert` is the intending — you type it because
-you want the copies, and by the time it writes you have already spent the
-transcoding time. `--dry-run` is how you hold it back. Either way nothing is ever
-deleted: the worst case is copies in the workspace that you remove by hand.
-
-Two steps stay manual, in Photos.app, in this order:
-
-1. If the originals were in the **iCloud Shared Photo Library**, select the new
-   copies and move them there — they are created in your personal library. See
-   [What still cannot be carried over](#what-still-cannot-be-carried-over).
-2. Only then delete the JPEG originals, if you decide to. They are gathered for
-   you in `Compressed Originals`, next to their copies.
-
-Doing them the other way round removes the originals for everyone they were shared
-with while leaving your copies personal.
-
-**Deleting from an album needs `Cmd+Backspace`, not `Backspace`.** This matters
-because step 2 has you working inside an album, and there plain `Backspace` only
-removes the photo *from the album* — the file stays, the space is not reclaimed,
-and Recently Deleted stays empty, so nothing tells you it did not happen. The two
-gestures are indistinguishable in the interface. Verified the hard way: a
-deletion that appeared to succeed left every file in place, and `select` went on
-counting them, correctly.
-
-Photos' **search is not a way to check** afterwards, either. Its index is a
-separate database rebuilt in the background while the Mac is idle, so a photo
-that is really there can be missing from search results for a while, and one that
-was deleted can linger. Trust the albums, not the search field.
-
-`calibrate` also works on plain files, needing no library access at all:
-
-```sh
-aplc calibrate --files photo1.jpg photo2.jpg
-```
-
-### Which photos are left to convert
-
-A library too large to convert in one go has to be worked through in pieces, and
-the hard part of that is remembering where you stopped. **`aplc select`** answers
-it from the library itself, rather than from any record it keeps: it gathers the
-JPEGs of one month into an album, leaving out the ones it can already find a
-converted copy of.
-
-Every other command in month mode does this first, for itself, so you rarely type
-it. `select` remains for when you want the answer without the conversion.
-
-It can find them because `apply` gives every new HEIC its original's **filename
-stem** and its **exact creation date**. A converted JPEG therefore always has a
-matching HEIC sitting in the same month, and a single month's fetch sees both
-halves of the pair. A camera-native HEIC pairs with nothing, so a library full of
-them does not make their JPEG neighbours look converted.
-
-The rule is not infallible, and it is worth knowing which way it fails. A camera
-that saved the *same* shot as both a JPEG and a HEIC produces a genuine pair —
-same stem, same second — that this cannot tell from a conversion. Measured on one
-real library: of seven pairs, one was such a photo from 2021, years before the
-tool existed. The cost is that this JPEG is never offered for conversion: a
-saving not taken, not a photo at risk. Every uncertainty here is resolved the same
-way, towards doing less rather than assuming more.
-
-Both facts matter for what the answer survives. It does not depend on staging,
-which is temporary and thrown away after every run; nor on the journal; nor on
-the copies staying in the album `apply` put them in, which they will not once you
-move them into a Shared Library.
-
-That independence is the point, not a detail. The journal is now permanent and
-does remember across runs, but it can still only know about conversions this tool
-watched — a copy made before you installed it, or after you moved the journal
-aside, is invisible to it. Asking the library is the answer that holds whatever
-you do to the tool's own files.
+It begins by telling you where the month stands:
 
 ```
 July 2019
@@ -322,7 +113,6 @@ July 2019
   already HEIC                86
   JPEGs already converted     74
   JPEGs still to convert     240
-  already in the album         0
   added to aplc workspace > 2019-07 > Selected Originals   240
 
 Why the rest are excluded
@@ -330,201 +120,171 @@ Why the rest are excluded
   hasAdjustments  12  — the photo has edits that would be lost
 ```
 
-Re-running adds only what is missing. There is no command to empty the album
-again — see [The safety model](#the-safety-model) — so check the month before you
-run it. This is also the only command that reads outside a named album, which it
-must in order to build one.
+**Encoding is the whole cost**, at a few seconds per photo — importing is
+instant. A month is a coffee; a large library is days of machine time, which is
+why the tool is built around working through it a month at a time.
 
-Photos that reach you through an iCloud **Shared Album** are never offered, and
-should not be: what a shared album holds is a downscaled copy belonging to whoever
-posted it, not an original of yours to re-encode. Assets in a Shared *Library* are
-a different thing — those are full originals, and they are included.
+Note that `convert` writes without asking for confirmation: typing it *is* the
+confirmation, and `--dry-run` is how you hold it back. Nothing it writes is
+irreversible — the worst case is copies you delete by hand.
 
-### The workspace
+## Then, in Photos.app: three manual steps
 
-Both albums live in a folder tree that the tool builds as it goes:
+The space does not come back until you do these. Do them **in this order**.
+
+1. **Review the copies.** They are in `aplc workspace > YYYY-MM > Compressed
+   Copies`. Look at a few at full size, next to their originals.
+
+2. **Re-do the iCloud Shared Photo Library membership by hand.** If the originals
+   were in your Shared Library, the copies are *not*: they are always created in
+   your personal library, and no supported API can change that. Select them in
+   Photos.app and move them across.
+
+   This comes before step 3 on purpose. Deleting a shared original removes it
+   **for everyone it was shared with** — so if you delete first, the other
+   participants lose the photo and your copy stays personal.
+
+3. **Delete the JPEG originals.** They are gathered for you in `aplc workspace >
+   YYYY-MM > Compressed Originals`, so it is one select-all and one keystroke.
+
+   > **Inside an album you must press ⌘⌫ (Command-Delete), not plain ⌫.**
+   > Plain ⌫ only removes the photo *from the album*: the file stays, no space is
+   > reclaimed, and nothing reaches Recently Deleted — so nothing tells you it did
+   > not work. The two gestures look identical in the interface. This was
+   > discovered the hard way.
+
+   Deleted photos then sit in Recently Deleted for 30 days before the space is
+   actually returned.
+
+Two things worth knowing afterwards:
+
+- **People come back on their own.** Face-to-person assignments cannot be copied
+  by any supported API, but Photos re-derives them by recognition. The catch is
+  that `photoanalysisd` only runs while your Mac is **idle**, so a copy checked
+  straight after import shows no people at all and looks like a failure. Leave
+  the Mac alone for a while and they appear.
+- **Photos' search is not how to check what happened.** Its index is a separate
+  database rebuilt in the background, so it can miss a photo that is really there
+  and linger on one you deleted. Trust the albums.
+
+## The workspace
+
+The tool builds a folder tree in Photos as it goes, so you can see what is done:
 
 ```
 aplc workspace
 ├── 2019-06
-│   ├── Compressed Copies      the HEICs apply created
-│   ├── Compressed Originals   the JPEGs they replaced — delete from here
-│   └── Selected Originals     the JPEGs select found
+│   ├── Selected Originals     the JPEGs it found to convert
+│   ├── Compressed Copies      the HEICs it created
+│   └── Compressed Originals   the JPEGs those replaced — delete from here
 └── 2019-07
-    ├── Compressed Copies
-    ├── Compressed Originals
-    └── Selected Originals
+    └── …
 ```
 
-The folder is named after the tool rather than the work, so it is obvious in the
-sidebar that something else maintains it. The month folders are zero-padded
-because Photos sorts them as text, and `2019-7` would file July after October.
+Copies are filed by the **capture date of the original**, not by when you
+converted them, so a photo you convert next year still lands beside the JPEG it
+came from. Photos with no capture date at all go to `aplc workspace > undated`.
+Nothing is created before there is something to put in it.
 
-**Copies are filed by the capture date of the original, not by when you converted
-them.** So an album spanning two months produces two destinations in one run,
-and a photo you convert next year still lands beside the JPEG it came from. A
-photo with no capture date at all goes to `aplc workspace > undated`, since
-filing it under some month would be inventing the one fact the tree is organised
-by.
+**Why `Selected Originals` and `Compressed Originals` can differ.** They usually
+hold the same photos, but not always, and the difference is deliberate:
+`Compressed Originals` only accepts a JPEG whose replacement **this tool made, in
+a run it watched, and checked afterwards**. So a photo that was skipped because a
+converted copy already existed appears in `Selected Originals` but never in
+`Compressed Originals` — even though its copy is sitting right there. Photos you
+converted before installing the tool never appear in it either.
 
-Nothing is created before there is something to put in it: a month with nothing
-left to convert leaves no empty folder behind.
+That narrowness is the point: `Compressed Originals` is the album that invites
+deletion, and having *found* a replacement is not the same standard as having
+*made* one. To see the wider picture, use the "JPEGs already converted" count
+that every run prints.
 
-**`Compressed Originals` is the point of the whole arrangement.** Converting only
-adds; the space comes back when you delete the JPEGs, and that step is yours. So
-`apply` gathers each original whose copy it just created into one album, next to
-the copies, ready to select and delete in a single gesture.
+One caveat: **album membership is one-way.** Putting a photo into an album needs
+no destructive API; taking it out does, and this tool contains none. So a wrong
+month is undone by hand in Photos.app, and nothing here can empty an album it
+filled.
 
-What earns a photo a place there is deliberately narrow: **this tool made the
-replacement, in a run it watched, and checked it afterwards.** A JPEG skipped
-because a copy already existed does *not* go in, even though its copy is sitting
-right there — the album invites deletion, so finding a replacement is not the
-same standard as having made one. Photos converted before you started using this
-tool will never appear in it either. Use `select`'s "JPEGs already converted"
-count for those; it answers the wider question.
+## Other commands
 
-### Two ways in, and why you might pick the second
+`convert` is the one to use. The pipeline steps exist separately, mostly for
+looking at things:
 
-An asset created through `PHAssetCreationRequest` belongs to no import session:
-Photos records that in `ZASSET.ZIMPORTSESSION`, and with nothing there the copy
-never appears under **Collections > Other > Imports**. PhotoKit offers no way to
-set it — not in the public headers, and not in the framework's symbol table.
-
-`--import-via-applescript` asks Photos.app to import the file instead, through
-the `import` command in its scripting dictionary. Measured on a real library:
-
-| | default (PhotoKit) | `--import-via-applescript` |
-|---|---|---|
-| **Under Imports** | no | **yes**, as one entry per run |
-| In a Shared Library | no | no — unchanged |
-| Filename | preserved | preserved, Photos does not rename |
-| Capture date | exact | exact |
-
-**That first row is the whole of it.** The two routes also write different values
-into the database's `ZIMPORTEDBY` columns, but Photos' Info panel does not show
-them, so it is not a difference you can see.
-
-The Shared Library row is the one worth reading twice. If the line you are
-missing says *"Added to library by <a person's name>"*, that is iCloud Shared
-Photo Library membership, and **neither route sets it** — no supported API can.
-Moving the copies in Photos.app is still the only way.
-
-The whole run is handed over in **one** `import` call, so a month's conversion
-reads as a single import event. That is not a performance detail: one call is one
-session, so importing photo by photo would fill the Imports view with a
-single-photo entry per conversion — worse than leaving it alone.
-
-It is off by default. It needs the optional **Automation → Photos** consent to
-become mandatory, and it hands Photos the reading of the filename, which the
-default route sets itself. Whether one line in Collections is worth that is
-exactly the kind of thing only you can decide, which is why it is a switch.
-
-### Duplicates are refused at the door
-
-`apply` will not import a second copy of a photo it already imported, even when
-its own journal has been moved aside or started fresh. Before creating an
-asset it looks for a HEIC in the library with the same filename stem and the same
-capture second — the pair identity described above — and if it finds one:
-
-| What it finds | What it does |
+| Command | What it does |
 |---|---|
-| the same image, byte for byte | skips it, and says so |
-| a different image | asks you: `[y/N/a=all/q=quit]` |
-| a copy it cannot read | asks you, saying it could not compare |
+| `aplc scan --year Y --month M` | Census: how many photos are convertible, and why the rest are not. Writes nothing but album membership. |
+| `aplc calibrate --year Y --month M` | Encodes a sample at several qualities and prints the path, for you to judge by eye. |
+| `aplc calibrate --files a.jpg b.jpg` | The same on plain files, with no library access at all. |
+| `aplc select --year Y --month M` | Just the "what is left to convert" step, on its own. |
+| `aplc transcode` / `verify` / `apply` | The individual stages. Staging is temporary, so they cannot hand work to each other across separate runs — `convert` is what runs them in one process. |
 
-The comparison is dimensions first, which is free, then SHA-256 against the
-digest the ledger already holds. It is **strictly offline**: needing to compare
-is not a reason to pull a photo down from iCloud, so an existing copy that is not
-on disk becomes a question rather than a silent decision.
+Options worth knowing:
 
-Comparing bytes works because two things are true, both measured rather than
-assumed: the encoder is **deterministic** — the same photo at the same quality
-produces the same file, to the byte — and `PHAssetCreationRequest` stores the
-resource **verbatim**, so the copy in the library still hashes to what the ledger
-recorded for the file that made it. That is what puts the first row of the table
-in reach: a photo converted again the same way is recognised as the same photo,
-not merely as one with a matching name.
+| Option | |
+|---|---|
+| `--album "Name"` | Work on an album you made by hand instead of a month. The only form that writes nothing at all. |
+| `--limit N` | Stop after N photos. |
+| `--dry-run` | Do everything except write to the library. |
+| `--min-ssim` | The fidelity target every conversion must reach. Default 0.97. |
+| `--quality` | Fix the encoder quality instead of searching per photo. See [TECHNICAL.md](TECHNICAL.md#quality-is-chosen-per-photo). |
+| `--dest-album "Name"` | Put every copy in one flat album instead of the month workspace. |
+| `--max-download-gb` | Ceiling on what may be pulled from iCloud in a run. Default 5 GB; `0` refuses downloads entirely. |
+| `--import-via-applescript` | Import through Photos.app so the copies appear under Collections › Imports. See [TECHNICAL.md](TECHNICAL.md#two-import-routes). |
 
-Not importing is the default answer, because the two mistakes do not cost the
-same: a skip is undone by running the command again, a second copy is undone by
-hand in Photos.app. With no terminal attached — in a script, or a cron job —
-there is nobody to ask, so the question becomes a skip and is reported as one.
+`aplc --help` and `aplc <command> --help` document the rest.
 
-### Quality is chosen per photo, by `transcode`
+## Where your files go
 
-This happens in the **`aplc transcode`** step — the third line above, or step 2
-of `convert`. `--quality` is optional there, and *omitting it is what asks for
-the search*: each photo then gets the **cheapest encoder setting that still
-reaches `--min-ssim`** (default 0.97), found by encoding it and measuring, not by
-guessing.
+Encoded files live in a temporary directory that is removed when the run ends,
+whichever way it ends. There is nothing to clean up.
 
-This inverts the usual arrangement. Normally you pick a quality up front and SSIM
-is a veto applied afterwards, which throws the work away when it fails and
-silently overpays when it succeeds by a wide margin. Here SSIM is the objective
-and quality is only the means, so what you state is the thing you actually care
-about: *this much fidelity, at the smallest size that delivers it*.
-
-The search is possible because Apple's encoder is not continuous. Measured by
-encoding one image at every hundredth from 0.40 to 1.00 and hashing the results,
-61 values collapse to **26 distinct files** — and two images of different size,
-aspect and content produced identical boundaries, so the quantisation belongs to
-the encoder, not the picture. `aplc` therefore searches a ladder of 20 real
-rungs rather than a continuum, bisecting it and starting from the rung the
-previous photos in the album needed. Typically **two to three encodes per photo**.
-
-Consequences worth knowing:
-
-- **Values between rungs round down.** `--quality 0.85` encodes exactly as 0.79
-  does; `transcode` reports the rung it really used, not the number you typed.
-- **Above roughly 0.95 the HEIC becomes larger than the JPEG** — at quality 1.0
-  more than twice the size — so the ladder stops below that. The gate would
-  reject those as `insufficientSaving` anyway.
-- **A photo no rung can satisfy is skipped**, exactly as before. The difference
-  is that the skip now means *no quality would have worked*, not *the one you
-  chose did not*.
-
-On one set of photographs, targeting SSIM 0.97 against a fixed `--quality 0.8`:
-
-| | saved | SSIM range |
-|---|---|---|
-| fixed 0.80 | 77.1% | 0.9735 – 0.9805 |
-| automatic, target 0.97 | **82.6%** | 0.9703 – 0.9735 |
-
-The fixed setting was overshooting the bar it had been given, and paying for it
-in bytes. Where both happened to pick the same rung, they produced the identical
-file.
-
-Passing `--quality` explicitly still works and is the way to reproduce an old
-run. Either way, use `calibrate` and **look at the files**: a target that reads
-well as a number can still be visibly wrong on your own photographs, and SSIM
-does not know what the picture is of.
-
-### iCloud
-
-`--max-download-gb` caps what may be pulled from iCloud in a run (default 5 GB;
-`0` refuses downloads entirely). Originals already on disk are always used
-without touching the network — the export path tries offline first and only then
-considers the network, so a run cannot quietly pull down hundreds of gigabytes.
-
-## Layout
+The one exception is the journal:
 
 ```
-Sources/APLCCore/          testable core
-  ImageProbe.swift         structural + metadata facts about an image file
-  Transcoder.swift         JPEG -> HEIC preserving metadata and gain map
-  QualityMetrics.swift     SSIM and PSNR, strip-processed to bound memory
-  QualitySearch.swift      the encoder's real quality rungs, and the search
-  CandidateSelection.swift what a month still has left to convert
-  DuplicateCheck.swift     whether a staged file is already in the library
-  WorkspaceLayout.swift    the folder and album names, in one place
-  EligibilityGate.swift    the eight checks, as pure functions
-  Ledger.swift             append-only journal, SHA-256 digests
-  PhotoLibraryAccess.swift authorisation, album and folder lookup, metered export
-  PhotosScripting.swift    Apple Events for keywords, title and caption
-  Importer.swift           the only code that writes to the library
-Sources/aplc/              CLI subcommands
-Tests/APLCCoreTests/       110 tests, no photo library required
+~/Library/Application Support/aplc/aplc_ledger.jsonl
 ```
+
+Every run appends to it — what was converted, at what quality, to what fidelity,
+and which new asset each conversion became. **The journal records; the library
+decides.** It is never trusted as the authority on what is converted: every claim
+is checked against your library first. Delete a copy you made and the tool will
+offer that photo again, which is the right answer.
+
+## Known limitations
+
+- **Sequential.** No parallelism across photos yet, and measuring fidelity costs
+  1–2 s per encode. Passing `--quality` explicitly skips the search when time
+  matters more than bytes.
+- **`verify` re-checks structure and hashes**, and does not re-export originals to
+  recompute fidelity from scratch.
+- **Photos only.** In a library that holds much video, transcoding H.264 to HEVC
+  would usually reclaim more space than anything this tool does. It is not
+  implemented, and it is a considerably harder problem.
+
+## Disclaimer
+
+> **Use this at your own risk.**
+>
+> This tool was *written* to be incapable of destroying anything, and that
+> property is enforced by tests you can run. That is not the same as a guarantee
+> that nothing can go wrong. A bug, an untested version of macOS, an interrupted
+> run, an iCloud sync landing at the wrong moment, or a mistake of your own at
+> the deletion step can each end in **irreversible damage to your photo
+> library**.
+>
+> The step that actually reclaims space is a **deletion you perform yourself**,
+> entirely outside this tool's control — and if the photos are in a Shared
+> Library, it removes them for the other participants too.
+>
+> **Have a backup, and know that it restores, before you start.** iCloud Photos
+> is synchronisation, not backup: a deletion propagates to every device.
+>
+> **The author accepts no liability for any loss or damage**, to your photo
+> library or to anything else, arising from the use of this software. This is
+> what the MIT licence already says in legal terms; it is stated here in plain
+> language so that nobody has to go and read it.
+>
+> Try a small `--limit` first, and check the results in Photos.app before
+> converting a whole month.
 
 ## Tests
 
@@ -532,32 +292,12 @@ Tests/APLCCoreTests/       110 tests, no photo library required
 swift test
 ```
 
-Runs without a photo library: the gate is tested as pure functions, and the
-transcode path against synthetic JPEGs. The generated AppleScript is checked for
-escaping (quotes, backslashes, newlines in captions) and compiled with
-`osacompile`, which resolves terminology without executing anything.
-
-`SafetyInvariantTests` is the one that matters most. It fails the build if a
-destructive PhotoKit call appears in the sources, and — since Apple Events are a
-second route into the library — if a generated script ever uses a destructive
-verb or assigns anything beyond the three permitted properties. Its forbidden list
-also covers the private shared-library API, whose reach extends past your own
-photos to those of everyone you share with.
-
-## Known limitations
-
-- Sequential; no parallelism across assets yet. SSIM at full resolution costs
-  roughly 1–2 s per photo, and the quality search spends two or three of those
-  per photo instead of one. Passing `--quality` explicitly skips the search when
-  the time matters more than the bytes.
-- `verify` re-checks structure and hashes from the ledger. It does not re-export
-  originals to recompute SSIM from scratch.
-- **Photos only.** In a library that holds much video, transcoding H.264 to HEVC
-  would usually reclaim more space than anything this tool does. That is not
-  implemented, and it is a considerably harder problem: video has no equivalent of
-  SSIM-per-frame cheap enough to gate on, and Live Photos complicate the asset
-  model further.
+132 tests, no photo library and no permissions required: the gate is tested as
+pure functions, the encoding path against synthetic images, and the generated
+AppleScript is compiled without being executed. `SafetyInvariantTests` is the one
+that matters most — see [TECHNICAL.md](TECHNICAL.md#the-safety-model).
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) — including its disclaimer of warranty and
+liability, which is the legal form of the section above.
