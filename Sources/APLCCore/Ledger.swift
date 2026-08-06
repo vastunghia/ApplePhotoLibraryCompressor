@@ -96,6 +96,49 @@ public struct LedgerEntry: Sendable, Codable {
     }
 }
 
+/// Where the journal lives.
+///
+/// Deliberately *not* in the staging directory any more. Staging is scratch space
+/// that is thrown away when the run ends; the record of what was done to an
+/// irreplaceable library has to outlive it. This is also what finally makes
+/// `appliedIdentifiers` mean something across runs: the duplicate HEICs already
+/// in the library were made by pointing a fresh staging directory at an album
+/// that had been converted before, and a ledger that died with the folder could
+/// not have known.
+public enum LedgerLocation {
+    public static let filename = "aplc_ledger.jsonl"
+
+    /// `~/Library/Application Support/aplc/aplc_ledger.jsonl`.
+    ///
+    /// Not beside the photo library, which would have been the obvious home:
+    /// PhotoKit exposes no URL for it, there can be more than one `.photoslibrary`
+    /// in `~/Pictures`, and the bundle is Photos' to manage — a stray file inside
+    /// it is a file a library repair may remove.
+    public static func standard() throws -> URL {
+        let support = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        return support.appendingPathComponent("aplc").appendingPathComponent(filename)
+    }
+}
+
+/// What a read of the journal found, damage included.
+public struct LedgerRead: Sendable {
+    public let entries: [LedgerEntry]
+
+    /// Lines that could not be decoded. Reported rather than thrown on, and
+    /// counted rather than passed over in silence — see `read(at:)`.
+    public let unreadableLines: Int
+
+    public init(entries: [LedgerEntry], unreadableLines: Int) {
+        self.entries = entries
+        self.unreadableLines = unreadableLines
+    }
+}
+
 /// Append-only JSONL journal, one line per asset per phase.
 ///
 /// Two properties matter. Every line is flushed and `fsync`ed before the caller
@@ -113,11 +156,15 @@ public final class Ledger {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        // O_APPEND rather than seek-to-end. The journal is now one file shared by
+        // every run there will ever be, so two `aplc` processes can hold it open
+        // at once; with a remembered offset they would write over each other's
+        // lines, and with O_APPEND the kernel places each write at the real end.
+        let descriptor = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard descriptor >= 0 else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
         }
-        self.handle = try FileHandle(forWritingTo: url)
-        try self.handle.seekToEnd()
+        self.handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
 
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
@@ -136,20 +183,59 @@ public final class Ledger {
         fsync(handle.fileDescriptor)
     }
 
-    public static func readAll(at url: URL) throws -> [LedgerEntry] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+    /// Reads the journal, skipping lines it cannot decode and saying how many.
+    ///
+    /// It used to throw on the first bad line, which was the right call when the
+    /// file lived in a staging directory you could delete. A permanent journal
+    /// makes that a trap: one truncated line from a hard stop would refuse every
+    /// future run, with nothing to delete that would not also lose the history.
+    /// Skipping silently would be worse still, so the count comes back with the
+    /// entries and the commands say it out loud.
+    public static func read(at url: URL) throws -> LedgerRead {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return LedgerRead(entries: [], unreadableLines: 0)
+        }
         let text = try String(contentsOf: url, encoding: .utf8)
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
-        return try text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { try dec.decode(LedgerEntry.self, from: Data($0.utf8)) }
+
+        var entries: [LedgerEntry] = []
+        var damaged = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            if let entry = try? dec.decode(LedgerEntry.self, from: Data(line.utf8)) {
+                entries.append(entry)
+            } else {
+                damaged += 1
+            }
+        }
+        return LedgerRead(entries: entries, unreadableLines: damaged)
+    }
+
+    public static func readAll(at url: URL) throws -> [LedgerEntry] {
+        try read(at: url).entries
+    }
+
+    /// The entries whose staged file belongs to this staging root — that is, the
+    /// ones this run put there.
+    ///
+    /// The journal is global now, so `verify` and `apply` would otherwise reach
+    /// back over every transcode ever made, all of them pointing at temporary
+    /// directories that no longer exist.
+    public static func entries(_ entries: [LedgerEntry], stagedUnder root: URL) -> [LedgerEntry] {
+        // The trailing separator is not decoration: without it "/tmp/aplc-1"
+        // would also claim everything staged under "/tmp/aplc-10".
+        let prefix = root.standardizedFileURL.path + "/"
+        return entries.filter { ($0.stagedPath?.hasPrefix(prefix)) == true }
     }
 
     /// Local identifiers already carried through to a created asset. `apply`
     /// consults this so a re-run cannot duplicate work.
     public static func appliedIdentifiers(at url: URL) throws -> Set<String> {
-        Set(try readAll(at: url).filter { $0.outcome == .applied }.map(\.sourceLocalIdentifier))
+        appliedIdentifiers(in: try readAll(at: url))
+    }
+
+    public static func appliedIdentifiers(in entries: [LedgerEntry]) -> Set<String> {
+        Set(entries.filter { $0.outcome == .applied }.map(\.sourceLocalIdentifier))
     }
 }
 

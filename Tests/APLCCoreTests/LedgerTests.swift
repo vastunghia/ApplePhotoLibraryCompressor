@@ -88,6 +88,119 @@ final class LedgerTests: XCTestCase {
         XCTAssertEqual(try Ledger.readAll(at: url).first?.sourceFacts, facts)
     }
 
+    // MARK: - A journal that outlives the staging directory
+
+    /// One truncated line from a hard stop used to make the whole file
+    /// undecodable. That was survivable when the journal lived in a staging
+    /// directory you could delete; it is not, now that it is the permanent
+    /// record of what was done to the library.
+    func testACorruptLineIsSkippedAndCountedRatherThanFatal() throws {
+        let url = temp.file("ledger.jsonl")
+        let ledger = try Ledger(url: url)
+        try ledger.append(LedgerEntry(outcome: .transcoded,
+                                      sourceLocalIdentifier: "A/L0/001",
+                                      originalFilename: "IMG_1.JPG"))
+
+        // A line cut off mid-write, exactly as a crash would leave it.
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"outcome\":\"transc\n".utf8))
+        try handle.close()
+
+        let after = try Ledger(url: url)
+        try after.append(LedgerEntry(outcome: .applied,
+                                     sourceLocalIdentifier: "B/L0/001",
+                                     originalFilename: "IMG_2.JPG"))
+
+        let read = try Ledger.read(at: url)
+        XCTAssertEqual(read.unreadableLines, 1)
+        XCTAssertEqual(read.entries.count, 2)
+        XCTAssertEqual(read.entries.map(\.sourceLocalIdentifier), ["A/L0/001", "B/L0/001"])
+    }
+
+    func testAHealthyJournalReportsNoDamage() throws {
+        let url = temp.file("ledger.jsonl")
+        let ledger = try Ledger(url: url)
+        try ledger.append(LedgerEntry(outcome: .transcoded,
+                                      sourceLocalIdentifier: "A/L0/001",
+                                      originalFilename: "IMG_1.JPG"))
+        XCTAssertEqual(try Ledger.read(at: url).unreadableLines, 0)
+    }
+
+    /// Two `aplc` processes can now hold the one journal open at once. With a
+    /// remembered offset the second writer would overwrite the first's lines;
+    /// O_APPEND is what stops that.
+    func testInterleavedWritersDoNotOverwriteEachOther() throws {
+        let url = temp.file("ledger.jsonl")
+        let first = try Ledger(url: url)
+        let second = try Ledger(url: url)
+
+        try first.append(LedgerEntry(outcome: .transcoded,
+                                     sourceLocalIdentifier: "A/L0/001",
+                                     originalFilename: "A.JPG"))
+        try second.append(LedgerEntry(outcome: .transcoded,
+                                      sourceLocalIdentifier: "B/L0/001",
+                                      originalFilename: "B.JPG"))
+        try first.append(LedgerEntry(outcome: .applied,
+                                     sourceLocalIdentifier: "C/L0/001",
+                                     originalFilename: "C.JPG"))
+
+        let entries = try Ledger.readAll(at: url)
+        XCTAssertEqual(entries.map(\.originalFilename), ["A.JPG", "B.JPG", "C.JPG"])
+    }
+
+    // MARK: - Scoping a global journal to one run
+
+    func testEntriesAreScopedToTheirStagingRoot() {
+        let mine = URL(fileURLWithPath: "/tmp/aplc-1")
+        let entries = [
+            staged(at: "/tmp/aplc-1/heic/a.heic"),
+            staged(at: "/tmp/aplc-2/heic/b.heic"),
+            staged(at: nil),
+        ]
+        let scoped = Ledger.entries(entries, stagedUnder: mine)
+        XCTAssertEqual(scoped.map(\.originalFilename), ["a.heic"])
+    }
+
+    /// Without the trailing separator, "/tmp/aplc-1" would claim everything
+    /// staged under "/tmp/aplc-10" as its own.
+    func testAStagingRootDoesNotClaimASiblingWithTheSamePrefix() {
+        let entries = [staged(at: "/tmp/aplc-10/heic/a.heic")]
+        XCTAssertTrue(Ledger.entries(entries, stagedUnder: URL(fileURLWithPath: "/tmp/aplc-1")).isEmpty)
+        XCTAssertEqual(
+            Ledger.entries(entries, stagedUnder: URL(fileURLWithPath: "/tmp/aplc-10")).count, 1)
+    }
+
+    /// The point of the journal outliving staging: what has been imported is
+    /// remembered even though the directory that staged it is long gone.
+    func testAppliedIdentifiersSurviveAStagingRootThatNoLongerExists() throws {
+        let url = temp.file("ledger.jsonl")
+        let ledger = try Ledger(url: url)
+        try ledger.append(LedgerEntry(outcome: .applied,
+                                      sourceLocalIdentifier: "A/L0/001",
+                                      originalFilename: "A.JPG",
+                                      stagedPath: "/var/folders/gone/heic/a.heic"))
+
+        let read = try Ledger.read(at: url)
+        XCTAssertEqual(Ledger.appliedIdentifiers(in: read.entries), ["A/L0/001"])
+        XCTAssertTrue(Ledger.entries(read.entries,
+                                     stagedUnder: URL(fileURLWithPath: "/var/folders/new")).isEmpty)
+    }
+
+    func testTheStandardJournalSitsInApplicationSupport() throws {
+        let url = try LedgerLocation.standard()
+        XCTAssertEqual(url.lastPathComponent, "aplc_ledger.jsonl")
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "aplc")
+        XCTAssertTrue(url.path.contains("Application Support"), url.path)
+    }
+
+    private func staged(at path: String?) -> LedgerEntry {
+        LedgerEntry(outcome: .transcoded,
+                    sourceLocalIdentifier: path ?? "none",
+                    originalFilename: path.map { ($0 as NSString).lastPathComponent } ?? "none",
+                    stagedPath: path)
+    }
+
     func testDigestMatchesKnownValue() throws {
         let file = temp.file("data.bin")
         try Data("abc".utf8).write(to: file)

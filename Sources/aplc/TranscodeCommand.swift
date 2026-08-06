@@ -6,19 +6,24 @@ import Photos
 struct Transcode: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "transcode",
-        abstract: "Encode eligible JPEGs to HEIC in a staging folder. Never touches the library.",
+        abstract: "Encode eligible JPEGs to HEIC in a staging folder. Creates no asset.",
         discussion: """
             For each eligible asset this exports the original, encodes it to HEIC,
             re-reads the HEIC and checks it against the original, then records the
-            outcome in <out>/ledger.jsonl. The exported JPEG is deleted afterwards —
-            the library still holds it, so keeping a second copy only wastes space.
+            outcome in the journal. The exported JPEG is deleted afterwards — the
+            library still holds it, so keeping a second copy only wastes space.
 
-            Interrupted runs resume: assets already recorded as transcoded, whose
-            staged file is still present, are left alone.
+            Staging is a temporary directory that goes away when the run ends, so
+            on its own this command leaves you nothing to apply. `convert` is the
+            way to carry a conversion through in one piece.
+
+            With --year and --month it first brings that month's "Selected
+            Originals" up to date, the same work `select` does.
             """
     )
 
     @OptionGroup var staging: StagingOptions
+    @OptionGroup var ledgerOptions: LedgerOptions
     @OptionGroup var gate: GateOptions
 
     @OptionGroup var source: SourceAlbumOptions
@@ -42,12 +47,30 @@ struct Transcode: AsyncParsableCommand {
             throw ValidationError("this system's ImageIO cannot write HEIC")
         }
         try await PhotoLibraryAccess.authorize()
-        let collection = try source.resolve()
+
+        // Chained means `convert` has already selected for the whole run; doing
+        // it again here would be a second pass over the month for nothing.
+        let collection: PHAssetCollection
+        if !chained, source.shouldRefreshSelection {
+            guard let refreshed = try await source.resolveRefreshingSelection() else {
+                print(source.nothingLeftMessage)
+                return
+            }
+            collection = refreshed
+        } else {
+            collection = try source.resolve()
+        }
         let assets = PhotoLibraryAccess.imageAssets(in: collection)
 
-        let ledger = try Ledger(url: staging.ledgerURL)
-        let alreadyDone = try Self.completedIdentifiers(
-            ledgerURL: staging.ledgerURL, heicDirectory: staging.heicDirectory
+        let area = try staging.makeArea()
+        defer { area.cleanUp() }
+        let ledgerURL = try ledgerOptions.url()
+
+        let ledger = try Ledger(url: ledgerURL)
+        let read = try Ledger.read(at: ledgerURL)
+        ledgerOptions.warnIfDamaged(read)
+        let alreadyDone = Self.completedIdentifiers(
+            in: Ledger.entries(read.entries, stagedUnder: area.root)
         )
 
         // One Apple Event for the whole album. PhotoKit cannot read keywords,
@@ -121,9 +144,9 @@ struct Transcode: AsyncParsableCommand {
             }
 
             let stem = Format.safeFilename(for: asset.localIdentifier)
-            let exportedURL = staging.originalsDirectory
+            let exportedURL = area.originalsDirectory
                 .appendingPathComponent(stem).appendingPathExtension("jpg")
-            let heicURL = staging.heicDirectory
+            let heicURL = area.heicDirectory
                 .appendingPathComponent(stem).appendingPathExtension("heic")
 
             // The exported original is scratch space; the library keeps the real one.
@@ -281,7 +304,17 @@ struct Transcode: AsyncParsableCommand {
 
         print("\nNothing has been written to your photo library.")
         if !chained {
-            print("Next: aplc verify --out \(staging.out)")
+            // Only worth suggesting when the staged files will still be there.
+            // Without --staging-dir they go with the temporary directory, which
+            // is why `convert` is the ordinary way to run this.
+            if staging.stagingDir != nil {
+                print("Next: aplc apply \(source.forwardedArguments.joined(separator: " ")) --confirm")
+            } else {
+                print("""
+                    Staging was temporary and has been discarded. Run `aplc convert` \
+                    to carry a conversion through to your library in one go.
+                    """)
+            }
         }
     }
 
@@ -312,8 +345,11 @@ struct Transcode: AsyncParsableCommand {
     }
 
     /// Assets already transcoded in an earlier run whose staged file survives.
-    static func completedIdentifiers(ledgerURL: URL, heicDirectory: URL) throws -> Set<String> {
-        let entries = try Ledger.readAll(at: ledgerURL)
+    ///
+    /// Takes entries rather than a URL because the journal is global now: the
+    /// caller scopes it to this staging root first, so a resume cannot be
+    /// confused by a run that staged somewhere else.
+    static func completedIdentifiers(in entries: [LedgerEntry]) -> Set<String> {
         var done: Set<String> = []
         for entry in entries where entry.outcome == .transcoded || entry.outcome == .applied {
             guard let path = entry.stagedPath else { continue }

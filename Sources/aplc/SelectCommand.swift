@@ -62,6 +62,89 @@ struct Select: AsyncParsableCommand {
     }
 
     func run() async throws {
+        let outcome = try await Self.fill(year: year, month: month, into: album, verbose: verbose)
+
+        guard outcome.destination != nil else {
+            if outcome.selection.considered == 0 {
+                print("No photos were taken in \(outcome.label). Nothing to do.")
+            } else {
+                report(outcome, alreadyInAlbum: 0, added: 0)
+                print("\nNothing in \(outcome.label) is left to convert. Nothing was created.")
+            }
+            return
+        }
+
+        report(outcome, alreadyInAlbum: outcome.alreadyInAlbum, added: outcome.added)
+
+        let next = album.map { "--album \"\($0)\"" } ?? "--year \(year) --month \(month)"
+        print("""
+
+            Your photos are untouched — an album holds references, not copies, and \
+            nothing was deleted.
+
+            Next: aplc convert \(next)
+            """)
+    }
+
+    private func report(
+        _ outcome: Outcome,
+        alreadyInAlbum: Int,
+        added: Int
+    ) {
+        let selection = outcome.selection
+        let label = outcome.label
+        print("\n\(label)")
+        print(Format.table([
+            ("photos in the month", "\(selection.considered)"),
+            ("already HEIC", "\(selection.heicPresent)"),
+            ("JPEGs already converted", "\(selection.alreadyConverted)"),
+            ("JPEGs still to convert", "\(selection.candidates.count)"),
+            ("already in the album", "\(alreadyInAlbum)"),
+            ("added to \(destinationName)", "\(added)"),
+        ]))
+
+        let excluded = selection.skips.filter { $0.key != .alreadyApplied }
+        if !excluded.isEmpty {
+            print("\nWhy the rest are excluded")
+            let rows = excluded
+                .sorted { $0.value > $1.value }
+                .map { ("\($0.key.rawValue)", "\($0.value)  — \($0.key.explanation)") }
+            print(Format.table(rows))
+        }
+    }
+}
+
+// MARK: - The reusable half
+
+extension Select {
+    /// What one month's selection came to.
+    struct Outcome {
+        let label: String
+        let selection: CandidateSelection.Selection
+
+        /// nil when nothing was created, because there was nothing to put in it.
+        /// That is an ordinary result, not a failure: it is what a month with no
+        /// photos and a month already fully converted both look like, and the
+        /// caller distinguishes them by `selection.considered`.
+        let destination: PHAssetCollection?
+
+        let added: Int
+        let alreadyInAlbum: Int
+    }
+
+    /// Brings a month's `Selected Originals` up to date, creating the folder and
+    /// album if they are not there yet.
+    ///
+    /// Split out of `run()` for the same reason as `Scan.census` and
+    /// `Verify.verify`: every other command now calls it before doing its own
+    /// work, and composing by calling the real thing beats a second
+    /// implementation that can drift from it.
+    static func fill(
+        year: Int,
+        month: Int,
+        into album: String?,
+        verbose: Bool = false
+    ) async throws -> Outcome {
         let range = try MonthBounds.range(year: year, month: month)
         let label = MonthBounds.label(year: year, month: month)
 
@@ -69,8 +152,10 @@ struct Select: AsyncParsableCommand {
 
         let assets = PhotoLibraryAccess.imageAssets(createdIn: range)
         guard !assets.isEmpty else {
-            print("No photos were taken in \(label). Nothing to do.")
-            return
+            return Outcome(label: label,
+                           selection: CandidateSelection.select(
+                               among: [], policy: GatePolicy(allowDownloads: true)),
+                           destination: nil, added: 0, alreadyInAlbum: 0)
         }
         // Reading each asset's resources is the slow part and it is linear, so
         // say how much there is before starting rather than appearing to hang.
@@ -95,9 +180,8 @@ struct Select: AsyncParsableCommand {
         }
 
         guard !selection.candidates.isEmpty else {
-            report(selection, label: label, alreadyInAlbum: 0, added: 0)
-            print("\nNothing in \(label) is left to convert. Nothing was created.")
-            return
+            return Outcome(label: label, selection: selection,
+                           destination: nil, added: 0, alreadyInAlbum: 0)
         }
 
         // Created only now that there is something to put in it: an empty
@@ -118,44 +202,8 @@ struct Select: AsyncParsableCommand {
 
         try await Importer.add(toAdd, to: destination)
 
-        report(selection,
-               label: label,
-               alreadyInAlbum: selection.candidates.count - toAdd.count,
-               added: toAdd.count)
-
-        let next = album.map { "--album \"\($0)\"" } ?? "--year \(year) --month \(month)"
-        print("""
-
-            Your photos are untouched — an album holds references, not copies, and \
-            nothing was deleted.
-
-            Next: aplc convert \(next) --out ./staging
-            """)
-    }
-
-    private func report(
-        _ selection: CandidateSelection.Selection,
-        label: String,
-        alreadyInAlbum: Int,
-        added: Int
-    ) {
-        print("\n\(label)")
-        print(Format.table([
-            ("photos in the month", "\(selection.considered)"),
-            ("already HEIC", "\(selection.heicPresent)"),
-            ("JPEGs already converted", "\(selection.alreadyConverted)"),
-            ("JPEGs still to convert", "\(selection.candidates.count)"),
-            ("already in the album", "\(alreadyInAlbum)"),
-            ("added to \(destinationName)", "\(added)"),
-        ]))
-
-        let excluded = selection.skips.filter { $0.key != .alreadyApplied }
-        if !excluded.isEmpty {
-            print("\nWhy the rest are excluded")
-            let rows = excluded
-                .sorted { $0.value > $1.value }
-                .map { ("\($0.key.rawValue)", "\($0.value)  — \($0.key.explanation)") }
-            print(Format.table(rows))
-        }
+        return Outcome(label: label, selection: selection, destination: destination,
+                       added: toAdd.count,
+                       alreadyInAlbum: selection.candidates.count - toAdd.count)
     }
 }

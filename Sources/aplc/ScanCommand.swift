@@ -8,7 +8,13 @@ struct Scan: AsyncParsableCommand {
         commandName: "scan",
         abstract: "Census an album: how many photos are convertible, and why the rest are not.",
         discussion: """
-            Strictly read-only. Nothing is written to the library or to disk.
+            Nothing is written to disk, and no asset is ever created or altered.
+
+            With --year and --month it does bring the month's "Selected Originals"
+            up to date first, which means adding photos to that album — the same
+            work `select` does, so that a month you have never selected can be
+            scanned without a preparatory command. Pass --album instead to report
+            on an album exactly as it stands, writing nothing at all.
 
             Byte totals are deliberately absent: PhotoKit exposes no public API for
             a resource's file size, so the only honest way to measure the saving is
@@ -24,14 +30,17 @@ struct Scan: AsyncParsableCommand {
     func validate() throws { try source.requireSelection() }
 
     func run() async throws {
-        let census = try await Self.census(source: source, verbose: verbose)
+        guard let census = try await Self.census(source: source, verbose: verbose) else {
+            print(source.nothingLeftMessage)
+            return
+        }
         Self.report(census, album: source.displayName)
 
         if census.eligible > 0 {
             let next = source.forwardedArguments.joined(separator: " ")
             print("""
 
-                Next: aplc calibrate \(next) --out ./staging
+                Next: aplc convert \(next)
                 """)
         }
     }
@@ -45,9 +54,24 @@ struct Scan: AsyncParsableCommand {
     /// Shared with `convert`, which needs the counts rather than the printout —
     /// the same split as `Verify.verify`, and for the same reason: one census,
     /// two callers, no second implementation to drift.
-    static func census(source: SourceAlbumOptions, verbose: Bool = false) async throws -> Census {
+    ///
+    /// nil means the month has nothing left to convert and no album to report on.
+    /// - Parameter refreshingSelection: false when the caller has already run
+    ///   `select` itself, which is what `convert` does once for the whole chain.
+    static func census(
+        source: SourceAlbumOptions,
+        verbose: Bool = false,
+        refreshingSelection: Bool = true
+    ) async throws -> Census? {
         try await PhotoLibraryAccess.authorize()
-        let collection = try source.resolve()
+
+        let collection: PHAssetCollection
+        if refreshingSelection && source.shouldRefreshSelection {
+            guard let refreshed = try await source.resolveRefreshingSelection() else { return nil }
+            collection = refreshed
+        } else {
+            collection = try source.resolve()
+        }
         let assets = PhotoLibraryAccess.imageAssets(in: collection)
 
         var census = Census(total: assets.count)

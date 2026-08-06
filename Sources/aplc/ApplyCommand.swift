@@ -31,6 +31,7 @@ struct Apply: AsyncParsableCommand {
     )
 
     @OptionGroup var staging: StagingOptions
+    @OptionGroup var ledgerOptions: LedgerOptions
     @OptionGroup var gate: GateOptions
     @OptionGroup var source: SourceAlbumOptions
 
@@ -58,8 +59,18 @@ struct Apply: AsyncParsableCommand {
     }
 
     func run() async throws {
+        let area = try staging.makeArea()
+        defer { area.cleanUp() }
+        let ledgerURL = try ledgerOptions.url()
+
+        // Read once. The journal is permanent and grows with every photo ever
+        // converted, so the three separate reads this used to do would mean
+        // decoding the whole history three times per run.
+        let read = try Ledger.read(at: ledgerURL)
+        ledgerOptions.warnIfDamaged(read)
+
         // Gate one: staged files must pass an independent re-check.
-        let report = try Verify.verify(staging: staging, gate: gate)
+        let report = Verify.verify(entries: read.entries, stagedUnder: area.root, gate: gate)
         guard report.problems.isEmpty else {
             print("Refusing to apply: `verify` found \(report.problems.count) problem(s).")
             for problem in report.problems.prefix(10) {
@@ -68,14 +79,24 @@ struct Apply: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        let entries = try Ledger.readAll(at: staging.ledgerURL)
-        let alreadyApplied = try Ledger.appliedIdentifiers(at: staging.ledgerURL)
-        let pending = entries
+        // `alreadyApplied` is asked of the *whole* journal, not just this run's
+        // staging: that is the point of it outliving the staging directory. The
+        // pending queue is scoped, because only files still on disk can be
+        // imported.
+        let alreadyApplied = Ledger.appliedIdentifiers(in: read.entries)
+        let pending = Ledger.entries(read.entries, stagedUnder: area.root)
             .filter { $0.outcome == .transcoded }
             .filter { !alreadyApplied.contains($0.sourceLocalIdentifier) }
 
         guard !pending.isEmpty else {
-            print("Nothing to apply. \(alreadyApplied.count) asset(s) were applied previously.")
+            print("""
+                Nothing staged to apply. \(alreadyApplied.count) asset(s) have been \
+                applied in runs before this one.
+
+                Staging is temporary, so `transcode` in one command and `apply` in \
+                the next have nothing to hand between them: `aplc convert` does the \
+                whole pipeline in one process, which is the way to reach this step.
+                """)
             return
         }
 
@@ -101,14 +122,24 @@ struct Apply: AsyncParsableCommand {
 
         try await PhotoLibraryAccess.authorize()
 
-        // Match staged entries back to live assets by local identifier.
-        let sourceCollection = try source.resolve()
+        // Match staged entries back to live assets by local identifier. Chained
+        // means `convert` has already selected for the whole run.
+        let sourceCollection: PHAssetCollection
+        if !chained, source.shouldRefreshSelection {
+            guard let refreshed = try await source.resolveRefreshingSelection() else {
+                print(source.nothingLeftMessage)
+                return
+            }
+            sourceCollection = refreshed
+        } else {
+            sourceCollection = try source.resolve()
+        }
         var assetsByIdentifier: [String: PHAsset] = [:]
         for asset in PhotoLibraryAccess.imageAssets(in: sourceCollection) {
             assetsByIdentifier[asset.localIdentifier] = asset
         }
 
-        let ledger = try Ledger(url: staging.ledgerURL)
+        let ledger = try Ledger(url: ledgerURL)
 
         // One flat album, or one album per capture month created on demand. Both
         // are resolved lazily so a run that imports nothing creates nothing.
@@ -155,7 +186,7 @@ struct Apply: AsyncParsableCommand {
         // Strictly offline: comparing is not a reason to pull a photo down from
         // iCloud. An unreadable copy becomes a question, never a silent decision.
         let comparer = OriginalExporter(downloadBudgetBytes: nil)
-        let compareDirectory = staging.stagingRoot.appendingPathComponent("compare")
+        let compareDirectory = area.compareDirectory
 
         var created = 0
         var failed = 0

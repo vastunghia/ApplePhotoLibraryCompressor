@@ -52,10 +52,12 @@ copies and leaves deletion to you, in Photos.app.
   one-shot pipeline, treats being invoked as the confirmation and takes
   `--dry-run` instead. Both are idempotent via the ledger, and neither can do
   anything but add.
-- **A third command, `select`, writes only album membership** — it puts existing
-  photos into an album, which touches no photo and loses nothing. It is still a
-  one-way door, because taking a photo back out of an album needs a call this
-  tool does not contain; a wrong month is undone by hand in Photos.app.
+- **In month mode every command writes album membership** — putting existing
+  photos into `Selected Originals`, which touches no photo and loses nothing.
+  `scan` and `calibrate` are therefore not read-only with `--year`/`--month`;
+  `--album` is the form that reads and writes nothing. It is still a one-way
+  door, because taking a photo back out of an album needs a call this tool does
+  not contain; a wrong month is undone by hand in Photos.app.
 - **It gathers what you may delete; it never deletes it.** `apply` collects each
   replaced JPEG into `Compressed Originals` so the last step is one gesture, but
   that step stays yours and stays in Photos.app.
@@ -68,7 +70,8 @@ copies and leaves deletion to you, in Photos.app.
   capture second is already there. See
   [Duplicates are refused at the door](#duplicates-are-refused-at-the-door).
 - **Everything is journalled** to an append-only, `fsync`ed JSONL ledger before
-  any library write.
+  any library write. It lives outside the working directory and outlives every
+  run: `~/Library/Application Support/aplc/aplc_ledger.jsonl`.
 
 ### The gate
 
@@ -175,31 +178,23 @@ and the ledger still records what each new asset was meant to carry.
 
 ## Use
 
-Work through the library a month at a time. `select` gathers what that month
-still has left to convert, and every other command finds it from the same
-`--year` and `--month`:
+Work through the library a month at a time. One command does all of it:
 
 ```sh
-aplc select --year 2019 --month 7
+aplc convert --year 2019 --month 7 --dry-run
+aplc convert --year 2019 --month 7 --limit 3
 ```
 
-Then either run the whole pipeline at once:
+There is no preparatory step. Every command that takes `--year` and `--month`
+begins by gathering that month's unconverted JPEGs into `Selected Originals`,
+which is the work `select` does — so `select` is now only worth typing when you
+want to see that step on its own.
+
+To look before converting:
 
 ```sh
-aplc convert --year 2019 --month 7 --out ./staging --dry-run
-aplc convert --year 2019 --month 7 --out ./staging --limit 3
-```
-
-or drive it a step at a time, which is the same work with a pause after each:
-
-```sh
-aplc select    --year 2019 --month 7
-aplc scan      --year 2019 --month 7
-aplc calibrate --year 2019 --month 7 --out ./staging
-aplc transcode --year 2019 --month 7 --out ./staging   # no --quality: chosen per photo
-aplc verify    --out ./staging
-aplc apply     --year 2019 --month 7 --out ./staging             # dry run
-aplc apply     --year 2019 --month 7 --out ./staging --confirm --limit 3
+aplc scan      --year 2019 --month 7   # what is convertible, and why the rest is not
+aplc calibrate --year 2019 --month 7   # sample encodes at several qualities, to judge by eye
 ```
 
 Every command also takes `--album "Some Album"` instead, for an album you made
@@ -207,10 +202,37 @@ by hand; `apply` and `convert` take `--dest-album` to put the copies in one flat
 album rather than in the workspace. The two forms are alternatives — give one or
 the other.
 
-`convert` runs scan → transcode → verify → apply and stops before writing if the
-album holds nothing convertible, if the gate rejected everything, or if `verify`
-finds a problem. It is safe to re-run: transcoding resumes where it left off and
-nothing is imported twice.
+`convert` runs select → scan → transcode → verify → apply and stops before
+writing if the month has nothing left to convert, if the gate rejected
+everything, or if `verify` finds a problem. It is safe to re-run: nothing is
+imported twice.
+
+### Nothing is left on your disk
+
+Staged HEICs and exported originals go to a temporary directory that is removed
+when the run ends, whichever way it ends. There is no `--out`, and nothing to
+tidy up afterwards.
+
+The journal is the exception, and it is deliberate:
+
+```
+~/Library/Application Support/aplc/aplc_ledger.jsonl
+```
+
+Every run appends to it — what was converted, at what quality, to what SSIM, and
+which new asset each conversion became. That record is the point: a journal that
+died with a staging folder could not tell you that a photo had already been
+converted three months ago, and that is precisely how this library came to hold
+two and three HEIC copies of some photos.
+
+It is read leniently. A line left half-written by a hard stop is skipped and
+counted, never allowed to make the file unreadable — the whole file is the only
+record there is, and refusing to start because of one damaged line would be the
+worse failure.
+
+`transcode`, `verify` and `apply` still exist as separate commands, but with
+staging thrown away between them they have nothing to hand one another; `convert`
+runs them all in one process, which is why it is the way in.
 
 **`convert` writes without asking**, unlike `apply`. The flag exists to separate
 exploring from intending, and `convert` is the intending — you type it because
@@ -245,16 +267,19 @@ was deleted can linger. Trust the albums, not the search field.
 `calibrate` also works on plain files, needing no library access at all:
 
 ```sh
-aplc calibrate --out ./staging --files photo1.jpg photo2.jpg
+aplc calibrate --files photo1.jpg photo2.jpg
 ```
 
-### Which photos are left to convert, by `select`
+### Which photos are left to convert
 
 A library too large to convert in one go has to be worked through in pieces, and
 the hard part of that is remembering where you stopped. **`aplc select`** answers
 it from the library itself, rather than from any record it keeps: it gathers the
 JPEGs of one month into an album, leaving out the ones it can already find a
 converted copy of.
+
+Every other command in month mode does this first, for itself, so you rarely type
+it. `select` remains for when you want the answer without the conversion.
 
 It can find them because `apply` gives every new HEIC its original's **filename
 stem** and its **exact creation date**. A converted JPEG therefore always has a
@@ -270,15 +295,16 @@ tool existed. The cost is that this JPEG is never offered for conversion: a
 saving not taken, not a photo at risk. Every uncertainty here is resolved the same
 way, towards doing less rather than assuming more.
 
-Both facts matter for what the answer survives. It does not depend on the staging
-folder, which you may delete; nor on the copies staying in the album `apply` put
-them in, which they will not once you move them into a Shared Library.
+Both facts matter for what the answer survives. It does not depend on staging,
+which is temporary and thrown away after every run; nor on the journal; nor on
+the copies staying in the album `apply` put them in, which they will not once you
+move them into a Shared Library.
 
-That independence is the point, not a detail. The ledger that makes `apply`
-idempotent lives *inside* the staging folder, so it only knows about the
-conversions it watched: start a fresh one, point it at the same album, and you
-get a second HEIC of every photo. Asking the library instead is what spans the
-gap between one session and the next.
+That independence is the point, not a detail. The journal is now permanent and
+does remember across runs, but it can still only know about conversions this tool
+watched — a copy made before you installed it, or after you moved the journal
+aside, is invisible to it. Asking the library is the answer that holds whatever
+you do to the tool's own files.
 
 ```
 July 2019
@@ -349,8 +375,8 @@ count for those; it answers the wider question.
 
 ### Duplicates are refused at the door
 
-`apply` will not import a second copy of a photo it already imported, even from a
-staging directory that knows nothing about the first one. Before creating an
+`apply` will not import a second copy of a photo it already imported, even when
+its own journal has been moved aside or started fresh. Before creating an
 asset it looks for a HEIC in the library with the same filename stem and the same
 capture second — the pair identity described above — and if it finds one:
 

@@ -52,9 +52,11 @@ struct SourceAlbumOptions: ParsableArguments {
         return MonthKey(year: year, month: month)
     }
 
-    /// Finds the album. Never creates one: filling the workspace is `select`'s
-    /// job, and a command that silently made an empty album to work on would be
-    /// reporting on nothing.
+    /// Finds the album, and does not create one.
+    ///
+    /// Kept as the plain lookup for the `--album` path and for callers that have
+    /// already refreshed the selection. `resolveRefreshingSelection` is the way
+    /// in for everything else.
     func resolve() throws -> PHAssetCollection {
         if let album { return try PhotoLibraryAccess.findAlbum(titled: album) }
         return try PhotoLibraryAccess.findWorkspaceAlbum(
@@ -63,11 +65,50 @@ struct SourceAlbumOptions: ParsableArguments {
         )
     }
 
+    /// Whether this command should run `select` for itself first.
+    ///
+    /// Only in month mode. A `--album` that does not exist is a typo, and
+    /// creating an empty album to then report nothing about is exactly the
+    /// mistake the old "never creates one" rule existed to prevent — that rule
+    /// survives here, narrowed to the case where it was right.
+    var shouldRefreshSelection: Bool { monthKey != nil }
+
+    /// Brings the month's selection up to date, then resolves the album.
+    ///
+    /// Returns nil when the month has nothing left to convert, which is an
+    /// ordinary outcome and not an error: without this the caller would fail
+    /// with `no folder named "aplc workspace"` on a month it had simply already
+    /// finished.
+    func resolveRefreshingSelection(verbose: Bool = false) async throws -> PHAssetCollection? {
+        guard let key = monthKey else { return try resolve() }
+
+        let outcome = try await Select.fill(year: key.year, month: key.month,
+                                            into: nil, verbose: verbose)
+        guard let destination = outcome.destination else {
+            // Nothing was created, so there may be no album at all. If a previous
+            // run left one, work on it: it can still hold photos this month's
+            // fresh selection no longer offers.
+            return try? resolve()
+        }
+        if outcome.added > 0 {
+            print("Selected \(outcome.added) more photo(s) into \(displayName).")
+        }
+        return destination
+    }
+
     /// How to name this album in output, spelled the way the user would find it.
     var displayName: String {
         if let album { return "\"\(album)\"" }
         guard let key = monthKey else { return "the selected album" }
         return "\(WorkspaceLayout.rootFolder) > \(WorkspaceLayout.monthFolder(key)) > \(WorkspaceLayout.originalsAlbum)"
+    }
+
+    /// What to say when there is nothing to work on. One wording, so a month
+    /// already finished reads the same whichever command found that out.
+    var nothingLeftMessage: String {
+        guard let key = monthKey else { return "Nothing in \(displayName) can be converted." }
+        return "Nothing in \(MonthBounds.label(year: key.year, month: key.month)) "
+             + "is left to convert. Nothing was created."
     }
 
     /// The same choice, as arguments — so `convert` can hand it to the commands
@@ -79,15 +120,48 @@ struct SourceAlbumOptions: ParsableArguments {
     }
 }
 
-/// Options shared by every command that reads a staging directory.
+/// Where a command keeps its working files.
+///
+/// There is no visible option any more. Staged HEICs and exported originals are
+/// scaffolding — the copy that matters ends up in the library, and the record of
+/// it ends up in the ledger — so the default is a temporary directory that is
+/// removed when the run ends and leaves nothing behind.
+///
+/// `--staging-dir` is the way to pin it somewhere durable, which is what makes
+/// `transcode` and `apply` still composable as two separate invocations. Hidden
+/// because it is for taking a pipeline apart, not for ordinary use.
 struct StagingOptions: ParsableArguments {
-    @Option(name: .long, help: "Directory holding staged HEIC files and the ledger.")
-    var out: String
+    @Option(name: .customLong("staging-dir"), help: .hidden)
+    var stagingDir: String?
 
-    var stagingRoot: URL { URL(fileURLWithPath: out).standardizedFileURL }
-    var heicDirectory: URL { stagingRoot.appendingPathComponent("heic") }
-    var originalsDirectory: URL { stagingRoot.appendingPathComponent("originals") }
-    var ledgerURL: URL { stagingRoot.appendingPathComponent("ledger.jsonl") }
+    func makeArea() throws -> StagingArea { try StagingArea(pinnedTo: stagingDir) }
+}
+
+/// Where the journal lives. Persistent, and no longer part of staging.
+struct LedgerOptions: ParsableArguments {
+    @Option(name: .customLong("ledger"), help: .hidden)
+    var ledger: String?
+
+    func url() throws -> URL {
+        if let ledger { return URL(fileURLWithPath: ledger).standardizedFileURL }
+        return try LedgerLocation.standard()
+    }
+
+    var forwardedArguments: [String] {
+        guard let ledger else { return [] }
+        return ["--ledger", ledger]
+    }
+
+    /// Says so when the journal has damage, rather than passing over it. A line
+    /// lost to a hard stop costs nothing; a line lost silently is a hole in the
+    /// only record of what was done to the library.
+    func warnIfDamaged(_ read: LedgerRead) {
+        guard read.unreadableLines > 0 else { return }
+        let url = (try? self.url())?.path ?? LedgerLocation.filename
+        FileHandle.standardError.write(Data("""
+            warning: \(read.unreadableLines) unreadable line(s) in \(url) were skipped.
+            """.appending("\n").utf8))
+    }
 }
 
 struct GateOptions: ParsableArguments {

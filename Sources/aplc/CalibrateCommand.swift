@@ -8,16 +8,18 @@ struct Calibrate: AsyncParsableCommand {
         commandName: "calibrate",
         abstract: "Sweep HEIC quality over a sample to choose a setting from your own photos.",
         discussion: """
-            Writes nothing to the library. For each quality step it reports the mean
-            size saving and the mean SSIM against the original, and leaves the
-            encoded files under <out>/calibrate/q<quality>/ so you can look at them.
+            Creates no asset. For each quality step it reports the mean size saving
+            and the mean SSIM against the original, and leaves the encoded files in
+            a directory it names at the end, so you can look at them.
+
+            With --year and --month it brings that month's "Selected Originals" up
+            to date first, the same work `select` does. --files needs no library
+            access at all.
 
             Numbers alone should not decide this. A very high saving usually means
             visible quality loss somewhere in the set — open the files and judge.
             """
     )
-
-    @OptionGroup var staging: StagingOptions
 
     @OptionGroup var source: SourceAlbumOptions
 
@@ -43,7 +45,13 @@ struct Calibrate: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let sources = try await gatherSources()
+        // The one command whose staging outlives it, and on purpose: its whole
+        // product is files to judge by eye, so cleaning up would throw away the
+        // answer. A temporary directory still means no permanent residue —
+        // macOS clears /var/folders itself — and the path is printed at the end.
+        let area = try StagingArea()
+
+        let sources = try await gatherSources(in: area)
         guard !sources.isEmpty else {
             print("No convertible images found to calibrate on.")
             return
@@ -53,8 +61,7 @@ struct Calibrate: AsyncParsableCommand {
         var results: [(quality: Double, saved: Double, ssim: Double, worstSSIM: Double, n: Int)] = []
 
         for quality in steps.sorted() {
-            let directory = staging.stagingRoot
-                .appendingPathComponent("calibrate")
+            let directory = area.root
                 .appendingPathComponent("q\(Int(quality * 100))")
             let transcoder = Transcoder(quality: quality)
 
@@ -90,20 +97,32 @@ struct Calibrate: AsyncParsableCommand {
 
         print("""
 
-            Encoded samples are under \(staging.stagingRoot.appendingPathComponent("calibrate").path)
-            Compare a few against the originals, then pass your choice as --quality to `transcode`.
+            Encoded samples are under \(area.root.path)
+              open \(area.root.path)
+            Compare a few against the originals, then pass your choice as --quality
+            to `convert`. They are not deleted, but they are in a temporary place —
+            copy anything you want to keep.
             """)
     }
 
     /// Either the given files, or originals exported from a sample of the album.
-    private func gatherSources() async throws -> [URL] {
+    private func gatherSources(in area: StagingArea) async throws -> [URL] {
         if !files.isEmpty {
             return files.map { URL(fileURLWithPath: $0).standardizedFileURL }
         }
 
         guard !source.isEmpty else { return [] }
         try await PhotoLibraryAccess.authorize()
-        let collection = try source.resolve()
+        let collection: PHAssetCollection
+        if source.shouldRefreshSelection {
+            guard let refreshed = try await source.resolveRefreshingSelection() else {
+                print(source.nothingLeftMessage)
+                return []
+            }
+            collection = refreshed
+        } else {
+            collection = try source.resolve()
+        }
 
         let eligible = PhotoLibraryAccess.imageAssets(in: collection).filter {
             EligibilityGate.evaluatePreConditions(PhotoLibraryAccess.traits(for: $0)).isEligible
@@ -114,7 +133,7 @@ struct Calibrate: AsyncParsableCommand {
 
         let budget = maxDownloadGB > 0 ? Int(maxDownloadGB * 1_073_741_824) : nil
         let exporter = OriginalExporter(downloadBudgetBytes: budget)
-        let directory = staging.stagingRoot.appendingPathComponent("calibrate/originals")
+        let directory = area.originalsDirectory
 
         var urls: [URL] = []
         for asset in sample {
