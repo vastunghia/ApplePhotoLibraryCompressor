@@ -17,25 +17,27 @@ struct Aplc: AsyncParsableCommand {
             confirmation and --dry-run is how you hold it back; and `select`,
             which only ever fills an album.
 
-            The whole pipeline in one command, once you know you want the copies:
+            Work a month at a time. `select` gathers what that month still has
+            left to convert, and the rest find it from the same --year and --month:
 
-              aplc convert --album "My Album" --out ./staging --dest-album "Converted"
+              aplc select  --year 2019 --month 7
+              aplc convert --year 2019 --month 7 --out ./staging
 
             Or a step at a time, which is the same work with a pause after each:
 
-              aplc select    --year 2019 --month 7 --album "My Album"
-              aplc scan      --album "My Album"
-              aplc calibrate --album "My Album" --out ./staging
-              aplc transcode --album "My Album" --out ./staging
+              aplc select    --year 2019 --month 7
+              aplc scan      --year 2019 --month 7
+              aplc calibrate --year 2019 --month 7 --out ./staging
+              aplc transcode --year 2019 --month 7 --out ./staging
               aplc verify    --out ./staging
-              aplc apply     --album "My Album" --out ./staging --dest-album "Converted"
+              aplc apply     --year 2019 --month 7 --out ./staging --confirm
+
+            Everything lives in "aplc workspace" > "YYYY-MM" in Photos, with the
+            originals and their copies side by side. Pass --album instead to work
+            on an album you made by hand.
 
             Quality is chosen per photo, by `transcode`, to meet --min-ssim.
             Pass --quality to fix it by hand instead.
-
-            `select` stands before all of that: it builds the album to work on
-            from one month of photos, leaving out whatever it already finds a
-            converted copy of.
             """,
         version: "0.1.0",
         subcommands: [

@@ -19,6 +19,15 @@ final class SafetyInvariantTests: XCTestCase {
         // Deletes albums or removes assets from them.
         "deleteAssetCollections",
         "removeAssets",
+        // The same rule one level up. `PHCollectionListChangeRequest` is what
+        // builds the workspace folders, and the class that can create a folder
+        // can also unmake one or empty it — so a folder is as one-way as an
+        // album, deliberately and by the same test.
+        "deleteCollectionLists",
+        "removeChildCollections",
+        "removeChildCollectionsAtIndexes",
+        "replaceChildCollectionsAtIndexes",
+        "moveChildCollectionsAtIndexes",
         // Deletes the file we exported *from* the library rather than a copy.
         "PHAssetChangeRequest.deleteAssets",
         // Private API, and worse than everything above it: these act on an
@@ -79,7 +88,7 @@ final class SafetyInvariantTests: XCTestCase {
     /// set the three text properties.
     func testGeneratedAppleScriptsAreNonDestructive() {
         let scripts = [
-            PhotosScripting.readScript(album: "Any Album"),
+            PhotosScripting.readScript(for: ["A/L0/001"]),
             PhotosScripting.writeScript(for: [
                 ("A/L0/001", AssetTextMetadata(keywords: ["k"], title: "t", caption: "c"))
             ]),
@@ -114,6 +123,20 @@ final class SafetyInvariantTests: XCTestCase {
             guard trimmed.hasPrefix("set ") else { continue }
             XCTAssertTrue(permitted.contains { trimmed.hasPrefix($0) },
                           "unexpected assignment in generated script: \(trimmed)")
+        }
+    }
+
+    /// The read script names the same three properties as the write script, so
+    /// one misplaced `to` would turn a read into a write. It may only ever assign
+    /// to its own local variables.
+    func testTheReadScriptAssignsNothingToAMediaItem() {
+        let script = PhotosScripting.readScript(for: ["A/L0/001"])
+
+        for line in script.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("set ") else { continue }
+            XCTAssertFalse(trimmed.contains(" of m to "),
+                           "the read script assigns to a media item: \(trimmed)")
         }
     }
 

@@ -29,7 +29,8 @@ public enum PhotosScriptingError: Error, CustomStringConvertible {
     /// The user has not granted the terminal permission to control Photos.
     case automationNotAuthorized
     case photosUnavailable
-    case albumNotFound(String)
+    // No `albumNotFound`: nothing here looks an album up by name any more, so
+    // the error it used to raise can no longer happen.
     case scriptFailed(number: Int, message: String)
     case unexpectedResult(String)
 
@@ -42,8 +43,6 @@ public enum PhotosScriptingError: Error, CustomStringConvertible {
                 """
         case .photosUnavailable:
             return "Photos.app could not be reached"
-        case .albumNotFound(let name):
-            return "Photos has no album titled \"\(name)\""
         case .scriptFailed(let number, let message):
             return "Photos scripting error \(number): \(message)"
         case .unexpectedResult(let detail):
@@ -74,47 +73,71 @@ public enum PhotosScripting {
 
     // MARK: - Reading
 
-    /// Reads keywords, title and caption for every media item in an album,
-    /// keyed by `localIdentifier`.
+    /// Reads keywords, title and caption for the given assets, keyed by
+    /// `localIdentifier`.
+    ///
+    /// Addressed one asset at a time rather than by walking an album, because an
+    /// album title stopped identifying an album: the workspace repeats
+    /// "Selected Originals" and "Compressed Copies" in every month's folder, and
+    /// Photos' `albums` is a flat list "in no specific order", so a lookup by
+    /// name would silently answer about the wrong month. Identifiers are exact,
+    /// and the write path has always used them.
+    ///
+    /// An asset Photos cannot produce is simply absent from the result. That is
+    /// not the same as the whole read failing, which throws — the caller must
+    /// keep the two apart, since "no keywords" and "could not ask" mean opposite
+    /// things to `Transcoder`.
     @MainActor
-    public static func readTextMetadata(inAlbumTitled album: String) throws -> [String: AssetTextMetadata] {
-        let descriptor = try run(readScript(album: album))
-        return try parseReadResult(descriptor)
+    public static func readTextMetadata(
+        forIdentifiers identifiers: [String]
+    ) throws -> [String: AssetTextMetadata] {
+        guard !identifiers.isEmpty else { return [:] }
+
+        var result: [String: AssetTextMetadata] = [:]
+        for chunk in stride(from: 0, to: identifiers.count, by: batchSize).map({
+            Array(identifiers[$0..<min($0 + batchSize, identifiers.count)])
+        }) {
+            let descriptor = try run(readScript(for: chunk))
+            result.merge(try parseReadResult(descriptor)) { _, new in new }
+        }
+        return result
     }
 
-    static func readScript(album: String) -> String {
-        """
-        tell application "Photos"
-            set theAlbum to missing value
-            repeat with a in albums
-                if name of a is \(literal(album)) then
-                    set theAlbum to a
-                    exit repeat
-                end if
-            end repeat
-            if theAlbum is missing value then error "aplc:album-not-found" number 8001
-            set outList to {}
-            repeat with m in (get media items of theAlbum)
-                set kw to {}
-                try
-                    set kw to keywords of m
-                    if kw is missing value then set kw to {}
-                end try
-                set nm to ""
-                try
-                    set nm to name of m
-                    if nm is missing value then set nm to ""
-                end try
-                set ds to ""
-                try
-                    set ds to description of m
-                    if ds is missing value then set ds to ""
-                end try
-                set end of outList to {id of m, kw, nm, ds}
-            end repeat
-            return outList
-        end tell
-        """
+    static func readScript(for identifiers: [String]) -> String {
+        var body = ""
+        for identifier in identifiers {
+            // Each asset in its own `try`: one that Photos has lost must not
+            // cost us the other hundred and forty-nine in the batch.
+            body += """
+                    try
+                        set m to media item id \(literal(identifier))
+                        set kw to {}
+                        try
+                            set kw to keywords of m
+                            if kw is missing value then set kw to {}
+                        end try
+                        set nm to ""
+                        try
+                            set nm to name of m
+                            if nm is missing value then set nm to ""
+                        end try
+                        set ds to ""
+                        try
+                            set ds to description of m
+                            if ds is missing value then set ds to ""
+                        end try
+                        set end of outList to {id of m, kw, nm, ds}
+                    end try
+
+                """
+        }
+
+        return """
+            tell application "Photos"
+                set outList to {}
+            \(body)    return outList
+            end tell
+            """
     }
 
     static func parseReadResult(_ descriptor: NSAppleEventDescriptor) throws -> [String: AssetTextMetadata] {
@@ -257,8 +280,6 @@ public enum PhotosScripting {
             // -600 / -609: Photos is not running or the connection went away.
             case -600, -609:
                 throw PhotosScriptingError.photosUnavailable
-            case 8001:
-                throw PhotosScriptingError.albumNotFound(message)
             default:
                 throw PhotosScriptingError.scriptFailed(number: number, message: message)
             }

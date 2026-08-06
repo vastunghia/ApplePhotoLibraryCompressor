@@ -46,6 +46,11 @@ public struct LedgerEntry: Sendable, Codable {
     /// Identifier of the asset created by `apply`, if any.
     public var createdAssetLocalIdentifier: String?
 
+    /// The asset already in the library that stopped this one being imported.
+    /// Recorded so a skip says *what* it collided with, not merely that it did —
+    /// which is the difference between a line you can act on and one you cannot.
+    public var collidedWithLocalIdentifier: String?
+
     public init(
         timestamp: Date = Date(),
         outcome: LedgerOutcome,
@@ -65,7 +70,8 @@ public struct LedgerEntry: Sendable, Codable {
         stagedFacts: ImageFacts? = nil,
         sourceTextMetadata: AssetTextMetadata? = nil,
         appliedTextMetadata: AssetTextMetadata? = nil,
-        createdAssetLocalIdentifier: String? = nil
+        createdAssetLocalIdentifier: String? = nil,
+        collidedWithLocalIdentifier: String? = nil
     ) {
         self.timestamp = timestamp
         self.outcome = outcome
@@ -86,6 +92,7 @@ public struct LedgerEntry: Sendable, Codable {
         self.sourceTextMetadata = sourceTextMetadata
         self.appliedTextMetadata = appliedTextMetadata
         self.createdAssetLocalIdentifier = createdAssetLocalIdentifier
+        self.collidedWithLocalIdentifier = collidedWithLocalIdentifier
     }
 }
 

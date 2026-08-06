@@ -5,6 +5,8 @@ public enum PhotoLibraryError: Error, CustomStringConvertible {
     case notAuthorized(PHAuthorizationStatus)
     case albumNotFound(String)
     case ambiguousAlbum(String, count: Int)
+    case folderNotFound(String)
+    case ambiguousFolder(String, count: Int)
     case noOriginalResource(String)
     case resourceUnavailableLocally
     case exportFailed(String)
@@ -20,6 +22,10 @@ public enum PhotoLibraryError: Error, CustomStringConvertible {
             return "no album titled \"\(name)\" was found"
         case .ambiguousAlbum(let name, let count):
             return "\(count) albums are titled \"\(name)\"; rename one so the target is unambiguous"
+        case .folderNotFound(let name):
+            return "no folder named \"\(name)\" was found"
+        case .ambiguousFolder(let name, let count):
+            return "\(count) folders are named \"\(name)\"; rename one so the target is unambiguous"
         case .noOriginalResource(let id):
             return "asset \(id) has no original photo resource"
         case .resourceUnavailableLocally:
@@ -60,6 +66,56 @@ public enum PhotoLibraryAccess {
             throw PhotoLibraryError.ambiguousAlbum(title, count: matches.count)
         }
         return first
+    }
+
+    /// The collections directly inside a folder, or at the top of the sidebar
+    /// when `parent` is nil.
+    private static func children(of parent: PHCollectionList?) -> [PHCollection] {
+        let result = parent.map { PHCollection.fetchCollections(in: $0, options: nil) }
+            ?? PHCollection.fetchTopLevelUserCollections(with: nil)
+        var collections: [PHCollection] = []
+        collections.reserveCapacity(result.count)
+        result.enumerateObjects { collection, _, _ in collections.append(collection) }
+        return collections
+    }
+
+    /// Finds exactly one folder with this name inside `parent`, or at the top
+    /// level. Refuses to guess when several match, as `findAlbum` does.
+    public static func findFolder(named name: String, in parent: PHCollectionList?) throws -> PHCollectionList {
+        let matches = children(of: parent)
+            .compactMap { $0 as? PHCollectionList }
+            .filter { $0.localizedTitle == name }
+        guard let first = matches.first else { throw PhotoLibraryError.folderNotFound(name) }
+        guard matches.count == 1 else {
+            throw PhotoLibraryError.ambiguousFolder(name, count: matches.count)
+        }
+        return first
+    }
+
+    /// Finds exactly one album with this title inside `folder`.
+    ///
+    /// Scoped to the folder rather than to the library, which is the whole point:
+    /// the workspace repeats the same album titles in every month, so a title on
+    /// its own stopped identifying anything the day the folders appeared.
+    public static func findAlbum(titled title: String, in folder: PHCollectionList) throws -> PHAssetCollection {
+        let matches = children(of: folder)
+            .compactMap { $0 as? PHAssetCollection }
+            .filter { $0.localizedTitle == title }
+        guard let first = matches.first else { throw PhotoLibraryError.albumNotFound(title) }
+        guard matches.count == 1 else {
+            throw PhotoLibraryError.ambiguousAlbum(title, count: matches.count)
+        }
+        return first
+    }
+
+    /// Resolves `aplc workspace` > `2026-02` > *title* without creating anything.
+    public static func findWorkspaceAlbum(
+        _ title: String,
+        inFolderNamed folder: String
+    ) throws -> PHAssetCollection {
+        let root = try findFolder(named: WorkspaceLayout.rootFolder, in: nil)
+        let month = try findFolder(named: folder, in: root)
+        return try findAlbum(titled: title, in: month)
     }
 
     public static func imageAssets(in collection: PHAssetCollection) -> [PHAsset] {

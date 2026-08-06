@@ -1,5 +1,6 @@
 import APLCCore
 import ArgumentParser
+import Darwin
 import Foundation
 import Photos
 
@@ -8,26 +9,32 @@ struct Apply: AsyncParsableCommand {
         commandName: "apply",
         abstract: "Add staged HEIC files to the library as new assets. Deletes nothing.",
         discussion: """
-            This is the only command that writes to your photo library, and it can
-            only add. The JPEG originals stay exactly where they are; your library
-            will temporarily grow. Removing the originals is a manual step in
+            The JPEG originals stay exactly where they are; your library will
+            temporarily grow. Removing the originals is a manual step in
             Photos.app, once you are satisfied with the copies.
+
+            Each copy is filed by the capture date of its original, in
+            "aplc workspace" > "YYYY-MM" > "Compressed Copies", so an album that
+            spans two months produces two destinations. --dest-album overrides
+            that with a single flat album.
 
             Runs as a dry run unless you pass --confirm. It refuses to start if
             `verify` reports any problem, and it skips assets already applied, so
             running it twice cannot create duplicates.
+
+            It also asks the library, not just the ledger: a staged file whose
+            copy is already there — same filename, same capture second — is
+            skipped when the two are identical, and put to you when they differ.
             """
     )
 
     @OptionGroup var staging: StagingOptions
     @OptionGroup var gate: GateOptions
-
-    @Option(help: "Title of the album the originals came from.")
-    var album: String
+    @OptionGroup var source: SourceAlbumOptions
 
     @Option(name: .customLong("dest-album"),
-            help: "Album to place the converted copies in. Created if absent.")
-    var destAlbum: String
+            help: "Put every copy in this one album instead of the workspace's month folders.")
+    var destAlbum: String?
 
     @Flag(help: "Actually write to the library. Without this, nothing is created.")
     var confirm: Bool = false
@@ -39,6 +46,14 @@ struct Apply: AsyncParsableCommand {
     // re-run is `convert`, not `apply`.
     @Flag(name: .customLong("chained"), help: .hidden)
     var chained: Bool = false
+
+    func validate() throws { try source.requireSelection() }
+
+    /// Where the copies will go, spelled as the user would find it in Photos.
+    private var destinationDescription: String {
+        if let destAlbum { return "\"\(destAlbum)\"" }
+        return "\(WorkspaceLayout.rootFolder) > (capture month) > \(WorkspaceLayout.copiesAlbum)"
+    }
 
     func run() async throws {
         // Gate one: staged files must pass an independent re-check.
@@ -71,7 +86,7 @@ struct Apply: AsyncParsableCommand {
             ("new HEIC assets to create", "\(planned.count)"),
             ("added to the library now", Format.bytes(addedBytes)),
             ("recoverable once you delete the JPEGs", Format.bytes(savedBytes)),
-            ("destination album", destAlbum),
+            ("destination", destinationDescription),
         ]))
 
         guard confirm else {
@@ -85,42 +100,190 @@ struct Apply: AsyncParsableCommand {
         try await PhotoLibraryAccess.authorize()
 
         // Match staged entries back to live assets by local identifier.
-        let sourceCollection = try PhotoLibraryAccess.findAlbum(titled: album)
+        let sourceCollection = try source.resolve()
         var assetsByIdentifier: [String: PHAsset] = [:]
         for asset in PhotoLibraryAccess.imageAssets(in: sourceCollection) {
             assetsByIdentifier[asset.localIdentifier] = asset
         }
 
-        let destination = try await Importer.ensureAlbum(titled: destAlbum)
         let ledger = try Ledger(url: staging.ledgerURL)
+
+        // One flat album, or one album per capture month created on demand. Both
+        // are resolved lazily so a run that imports nothing creates nothing.
+        var flatDestination: PHAssetCollection?
+        var albumsByFolder: [String: PHAssetCollection] = [:]
+        func destination(forFolderNamed folder: String) async throws -> PHAssetCollection {
+            if let destAlbum {
+                if let flatDestination { return flatDestination }
+                let album = try await Importer.ensureAlbum(titled: destAlbum)
+                flatDestination = album
+                return album
+            }
+            if let existing = albumsByFolder[folder] { return existing }
+            let album = try await Importer.ensureWorkspaceAlbum(
+                WorkspaceLayout.copiesAlbum, inFolderNamed: folder
+            )
+            albumsByFolder[folder] = album
+            return album
+        }
+
+        // The library's own answer to "is this already here", built one month at
+        // a time and only for the months this run actually touches.
+        var duplicateIndexes: [MonthKey: [TwinKey: [LibraryCopy]]] = [:]
+        func duplicateIndex(for month: MonthKey) throws -> [TwinKey: [LibraryCopy]] {
+            if let cached = duplicateIndexes[month] { return cached }
+            let range = try MonthBounds.range(year: month.year, month: month.month)
+            let copies: [(key: TwinKey, copy: LibraryCopy)] = PhotoLibraryAccess
+                .imageAssets(createdIn: range)
+                .compactMap { asset in
+                    let traits = PhotoLibraryAccess.traits(for: asset)
+                    guard traits.uniformTypeIdentifier == "public.heic",
+                          let key = TwinKey(filename: traits.originalFilename,
+                                            creationDate: asset.creationDate)
+                    else { return nil }
+                    return (key, LibraryCopy(localIdentifier: asset.localIdentifier,
+                                             pixelWidth: asset.pixelWidth,
+                                             pixelHeight: asset.pixelHeight))
+                }
+            let index = DuplicateCheck.index(copies)
+            duplicateIndexes[month] = index
+            return index
+        }
+
+        // Strictly offline: comparing is not a reason to pull a photo down from
+        // iCloud. An unreadable copy becomes a question, never a silent decision.
+        let comparer = OriginalExporter(downloadBudgetBytes: nil)
+        let compareDirectory = staging.stagingRoot.appendingPathComponent("compare")
 
         var created = 0
         var failed = 0
+        var skipped = 0
+        var importRest = false
+        var stopped = false
+        var perDestination: [String: Int] = [:]
+        // Without a terminal there is nobody to answer, so a question would be a
+        // hang. `convert` inherits this: run it from a script and a differing
+        // copy is skipped and reported, not waited on.
+        let interactive = isatty(FileHandle.standardInput.fileDescriptor) == 1
         /// New asset identifier -> the metadata it should end up carrying.
         var pendingText: [String: AssetTextMetadata] = [:]
         var createdFilenames: [String: String] = [:]
 
         for entry in planned {
+            if stopped { break }
             guard let stagedPath = entry.stagedPath else { continue }
-            guard let source = assetsByIdentifier[entry.sourceLocalIdentifier] else {
+            guard let sourceAsset = assetsByIdentifier[entry.sourceLocalIdentifier] else {
                 failed += 1
                 try ledger.append(LedgerEntry(
                     outcome: .failed,
                     sourceLocalIdentifier: entry.sourceLocalIdentifier,
                     originalFilename: entry.originalFilename,
-                    error: "source asset is no longer in album \"\(album)\""
+                    error: "source asset is no longer in \(source.displayName)"
                 ))
                 continue
             }
 
+            let captureDate = sourceAsset.creationDate
+            let folder = WorkspaceLayout.folder(for: captureDate)
+
+            // A photo with no capture date has no pair identity, so it cannot be
+            // checked and is offered rather than assumed — the same asymmetry
+            // `select` makes, and for the same reason.
+            if let captureDate,
+               let key = TwinKey(filename: entry.originalFilename, creationDate: captureDate),
+               let candidate = try duplicateIndex(for: WorkspaceLayout.month(of: captureDate))[key]?.first {
+
+                // Left nil unless the existing copy is genuinely read: an
+                // unreadable one must reach the user as a question, and falling
+                // back to any other asset here would answer it with the wrong
+                // file's bytes.
+                var bytesEqual: Bool?
+                var existingBytes: Int?
+                if let existingAsset = PHAsset.fetchAssets(
+                       withLocalIdentifiers: [candidate.localIdentifier], options: nil
+                   ).firstObject,
+                   let resource = PhotoLibraryAccess.originalPhotoResource(for: existingAsset) {
+                    let scratch = compareDirectory.appendingPathComponent(
+                        Format.safeFilename(for: candidate.localIdentifier)
+                    ).appendingPathExtension("heic")
+                    if let export = try? await comparer.export(resource: resource, to: scratch) {
+                        existingBytes = export.byteCount
+                        bytesEqual = (try? Digest.sha256(of: export.url)) == entry.stagedSHA256
+                    }
+                }
+
+                let verdict = DuplicateCheck.verdict(
+                    stagedWidth: entry.stagedFacts?.width ?? 0,
+                    stagedHeight: entry.stagedFacts?.height ?? 0,
+                    stagedSHA256: entry.stagedSHA256,
+                    existing: candidate,
+                    bytesEqual: bytesEqual
+                )
+
+                var decision = DuplicateCheck.resolution(for: verdict)
+                if case .ask(let copy, let question) = decision {
+                    if importRest {
+                        decision = .importIt
+                    } else if !interactive {
+                        decision = .skip(
+                            .duplicateInLibrary,
+                            detail: "\(question); no terminal to ask on, so it was not imported",
+                            collidedWith: copy.localIdentifier
+                        )
+                    } else {
+                        switch askAboutDuplicate(
+                            filename: entry.originalFilename,
+                            question: question,
+                            existingBytes: existingBytes,
+                            stagedBytes: entry.stagedBytes,
+                            existing: copy
+                        ) {
+                        case .importIt:
+                            decision = .importIt
+                        case .importRest:
+                            importRest = true
+                            decision = .importIt
+                        case .skip:
+                            decision = .skip(.duplicateInLibrary,
+                                             detail: question,
+                                             collidedWith: copy.localIdentifier)
+                        case .quit:
+                            stopped = true
+                            decision = .skip(.duplicateInLibrary,
+                                             detail: "stopped by the user",
+                                             collidedWith: copy.localIdentifier)
+                        }
+                    }
+                }
+
+                if case .skip(let reason, let detail, let collided) = decision {
+                    skipped += 1
+                    // Always said out loud. A silent skip leaves the user with a
+                    // count in the summary and no way to know which photo it was
+                    // about, which is the one thing a report must not do.
+                    print("  skipped  \(entry.originalFilename)  — \(detail)")
+                    try ledger.append(LedgerEntry(
+                        outcome: .skipped,
+                        sourceLocalIdentifier: entry.sourceLocalIdentifier,
+                        originalFilename: entry.originalFilename,
+                        skipReason: reason,
+                        stagedPath: stagedPath,
+                        collidedWithLocalIdentifier: collided
+                    ))
+                    continue
+                }
+            }
+
             do {
+                let album = try await destination(forFolderNamed: folder)
                 let identifier = try await Importer.createAsset(
                     fromStagedHEIC: URL(fileURLWithPath: stagedPath),
                     originalFilename: heicFilename(from: entry.originalFilename),
-                    metadata: Importer.CarriedMetadata(from: source),
-                    into: destination
+                    metadata: Importer.CarriedMetadata(from: sourceAsset),
+                    into: album
                 )
                 created += 1
+                perDestination[destAlbum ?? folder, default: 0] += 1
                 if let text = entry.sourceTextMetadata, !text.isEmpty {
                     pendingText[identifier] = text
                     createdFilenames[identifier] = entry.originalFilename
@@ -156,12 +319,34 @@ struct Apply: AsyncParsableCommand {
                                                     filenames: createdFilenames)
 
         print("\nApply summary")
-        print(Format.table([
+        var rows: [(String, String)] = [
             ("assets created", "\(created)"),
+            ("skipped as duplicates", "\(skipped)"),
             ("failures", "\(failed)"),
-            ("album", destAlbum),
-            ("keywords/title/caption transferred", textReport.summary),
-        ]))
+        ]
+        for (name, count) in perDestination.sorted(by: { $0.key < $1.key }) {
+            rows.append((destAlbum == nil ? "into \(name)" : "into \"\(name)\"", "\(count)"))
+        }
+        rows.append(("keywords/title/caption transferred", textReport.summary))
+        print(Format.table(rows))
+
+        if stopped {
+            print("\nStopped at your request. Nothing after that point was touched.")
+        }
+
+        // Name the albums that actually received something, rather than the
+        // pattern: after the run there is no reason to make the user work out
+        // which months "(capture month)" turned into.
+        let reviewTarget: String
+        if let destAlbum {
+            reviewTarget = "\"\(destAlbum)\""
+        } else if perDestination.isEmpty {
+            reviewTarget = destinationDescription
+        } else {
+            reviewTarget = perDestination.keys.sorted()
+                .map { "\(WorkspaceLayout.rootFolder) > \($0) > \(WorkspaceLayout.copiesAlbum)" }
+                .joined(separator: ", ")
+        }
 
         print("""
 
@@ -185,10 +370,57 @@ struct Apply: AsyncParsableCommand {
             shared original removes it for the other participants too, while your
             converted copy stays personal.
 
-            Review \(destAlbum) in Photos.app. Deleting the JPEG originals — if you decide
-            to — is a manual step, and they will sit in Recently Deleted for 30 days first.
+            Review \(reviewTarget) in Photos.app. Deleting the JPEG
+            originals — if you decide to — is a manual step, and they will sit in
+            Recently Deleted for 30 days first.
             """)
     }
+
+    // MARK: - Duplicates
+
+    private enum DuplicateAnswer {
+        case importIt
+        case skip
+        case importRest
+        case quit
+    }
+
+    /// Asks once per colliding photo. Defaults to *not* importing, because the
+    /// cost of the two mistakes is not symmetric: a skip is undone by re-running,
+    /// a second copy is undone by hand in Photos.app.
+    private func askAboutDuplicate(
+        filename: String,
+        question: String,
+        existingBytes: Int?,
+        stagedBytes: Int?,
+        existing: LibraryCopy
+    ) -> DuplicateAnswer {
+        let existingSize = existingBytes.map(Format.bytes) ?? "size unknown"
+        let stagedSize = stagedBytes.map(Format.bytes) ?? "size unknown"
+        print("""
+
+              \(filename) — \(question)
+                existing  \(existingSize)  \(existing.pixelWidth)x\(existing.pixelHeight)
+                staged    \(stagedSize)
+            """)
+
+        while true {
+            print("  Import anyway? [y/N/a=all/q=quit]: ", terminator: "")
+            guard let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() else {
+                // stdin closed mid-run: treat as the default rather than looping.
+                return .skip
+            }
+            switch answer {
+            case "y", "yes": return .importIt
+            case "", "n", "no": return .skip
+            case "a", "all": return .importRest
+            case "q", "quit": return .quit
+            default: continue
+            }
+        }
+    }
+
+    // MARK: - Text metadata
 
     private struct TextTransferReport {
         var attempted = 0
@@ -203,8 +435,8 @@ struct Apply: AsyncParsableCommand {
     }
 
     /// Applies the captured metadata to the new assets, then reads it back to
-    /// confirm it stuck. Never throws: the assets already exist, and the restore
-    /// file covers the failure case.
+    /// confirm it stuck. Never throws: the assets already exist, and the ledger
+    /// records what each was meant to carry.
     private func transferTextMetadata(
         _ assignments: [String: AssetTextMetadata],
         ledger: Ledger,
@@ -219,9 +451,12 @@ struct Apply: AsyncParsableCommand {
                 report.problems.append("\(filenames[identifier] ?? identifier): Photos refused the update")
             }
 
-            // Verify rather than assume: read the destination album back and
-            // compare against what we intended to set.
-            let actual = try await PhotosScripting.readTextMetadata(inAlbumTitled: destAlbum)
+            // Verify rather than assume: read the new assets back and compare
+            // against what we intended to set. Asked for by identifier, so it no
+            // longer matters which album — or which month's folder — they went to.
+            let actual = try await PhotosScripting.readTextMetadata(
+                forIdentifiers: Array(assignments.keys)
+            )
             for (identifier, expected) in assignments where !refused.contains(identifier) {
                 let got = actual[identifier]
                 if matches(expected: expected, actual: got) {
@@ -257,7 +492,8 @@ struct Apply: AsyncParsableCommand {
         return (expected.caption ?? "") == (actual.caption ?? "")
     }
 
-    /// Keeps the original stem so the pair stays recognisable side by side.
+    /// Keeps the original stem so the pair stays recognisable side by side — and
+    /// so `select` and the duplicate check can find the copy again.
     private func heicFilename(from original: String) -> String {
         let stem = (original as NSString).deletingPathExtension
         return stem.isEmpty ? "converted.heic" : "\(stem).heic"

@@ -19,8 +19,7 @@ struct Calibrate: AsyncParsableCommand {
 
     @OptionGroup var staging: StagingOptions
 
-    @Option(help: "Title of the album to sample from. Omit when using --files.")
-    var album: String?
+    @OptionGroup var source: SourceAlbumOptions
 
     @Option(parsing: .upToNextOption,
             help: "Image files to sample instead of an album. Needs no library access.")
@@ -39,9 +38,8 @@ struct Calibrate: AsyncParsableCommand {
     var maxDownloadGB: Double = 2.0
 
     func validate() throws {
-        guard album != nil || !files.isEmpty else {
-            throw ValidationError("provide either --album or --files")
-        }
+        guard files.isEmpty else { return }
+        try source.requireSelection()
     }
 
     func run() async throws {
@@ -103,9 +101,9 @@ struct Calibrate: AsyncParsableCommand {
             return files.map { URL(fileURLWithPath: $0).standardizedFileURL }
         }
 
-        guard let album else { return [] }
+        guard !source.isEmpty else { return [] }
         try await PhotoLibraryAccess.authorize()
-        let collection = try PhotoLibraryAccess.findAlbum(titled: album)
+        let collection = try source.resolve()
 
         let eligible = PhotoLibraryAccess.imageAssets(in: collection).filter {
             EligibilityGate.evaluatePreConditions(PhotoLibraryAccess.traits(for: $0)).isEligible

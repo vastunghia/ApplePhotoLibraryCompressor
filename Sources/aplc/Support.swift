@@ -1,6 +1,83 @@
 import APLCCore
 import ArgumentParser
 import Foundation
+import Photos
+
+/// Which photos a command works on: a month of the workspace, or a named album.
+///
+/// The two forms are exclusive. `--year`/`--month` is the normal way in, and
+/// resolves to `aplc workspace` > `2026-02` > `Selected Originals`, the album
+/// `select` fills. `--album` is the escape hatch for an album made by hand, and
+/// keeps the behaviour every command had before the workspace existed.
+struct SourceAlbumOptions: ParsableArguments {
+    @Option(help: "Year the photos were taken, e.g. 2019. Use with --month.")
+    var year: Int?
+
+    @Option(help: "Month the photos were taken, 1 to 12. Use with --year.")
+    var month: Int?
+
+    @Option(help: "Work on this album by name instead of a month of the workspace.")
+    var album: String?
+
+    var isEmpty: Bool { year == nil && month == nil && album == nil }
+
+    /// Checks that what was given makes sense together. Says nothing about
+    /// whether *something* was given: `calibrate` can work from `--files` and
+    /// needs no album at all, so that requirement belongs to each command.
+    func validate() throws {
+        if album != nil, year != nil || month != nil {
+            throw ValidationError("--album and --year/--month are alternatives; give one or the other.")
+        }
+        guard album == nil, !isEmpty else { return }
+
+        guard let year, let month else {
+            throw ValidationError("--year and --month go together; give both.")
+        }
+        guard (1...12).contains(month) else {
+            throw ValidationError("--month must be between 1 and 12, not \(month).")
+        }
+        guard (1...9999).contains(year) else {
+            throw ValidationError("--year must be a four-digit year, not \(year).")
+        }
+    }
+
+    /// For the commands that cannot work without an album.
+    func requireSelection() throws {
+        if isEmpty { throw ValidationError("give either --year and --month, or --album.") }
+    }
+
+    /// Nil when the command was pointed at a named album instead.
+    var monthKey: MonthKey? {
+        guard let year, let month, album == nil else { return nil }
+        return MonthKey(year: year, month: month)
+    }
+
+    /// Finds the album. Never creates one: filling the workspace is `select`'s
+    /// job, and a command that silently made an empty album to work on would be
+    /// reporting on nothing.
+    func resolve() throws -> PHAssetCollection {
+        if let album { return try PhotoLibraryAccess.findAlbum(titled: album) }
+        return try PhotoLibraryAccess.findWorkspaceAlbum(
+            WorkspaceLayout.originalsAlbum,
+            inFolderNamed: WorkspaceLayout.monthFolder(monthKey!)
+        )
+    }
+
+    /// How to name this album in output, spelled the way the user would find it.
+    var displayName: String {
+        if let album { return "\"\(album)\"" }
+        guard let key = monthKey else { return "the selected album" }
+        return "\(WorkspaceLayout.rootFolder) > \(WorkspaceLayout.monthFolder(key)) > \(WorkspaceLayout.originalsAlbum)"
+    }
+
+    /// The same choice, as arguments — so `convert` can hand it to the commands
+    /// it drives without deciding anything itself.
+    var forwardedArguments: [String] {
+        if let album { return ["--album", album] }
+        guard let key = monthKey else { return [] }
+        return ["--year", "\(key.year)", "--month", "\(key.month)"]
+    }
+}
 
 /// Options shared by every command that reads a staging directory.
 struct StagingOptions: ParsableArguments {

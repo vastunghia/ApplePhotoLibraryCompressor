@@ -32,12 +32,11 @@ struct Convert: AsyncParsableCommand {
     @OptionGroup var staging: StagingOptions
     @OptionGroup var gate: GateOptions
 
-    @Option(help: "Title of the album to convert.")
-    var album: String
+    @OptionGroup var source: SourceAlbumOptions
 
     @Option(name: .customLong("dest-album"),
-            help: "Album to place the converted copies in. Created if absent.")
-    var destAlbum: String
+            help: "Put every copy in this one album instead of the workspace's month folders.")
+    var destAlbum: String?
 
     @Option(name: .customLong("max-download-gb"),
             help: "Ceiling on data pulled from iCloud, in GB. 0 refuses downloads entirely.")
@@ -50,6 +49,8 @@ struct Convert: AsyncParsableCommand {
           help: "Do everything except write to the library.")
     var dryRun: Bool = false
 
+    func validate() throws { try source.requireSelection() }
+
     func run() async throws {
         // Both delegated commands are parsed before any work happens. Composing
         // by argument list means an option name could be wrong; parsing up front
@@ -59,11 +60,11 @@ struct Convert: AsyncParsableCommand {
         let transcode = try Transcode.parse(transcodeArguments())
         let apply = try Apply.parse(applyArguments())
 
-        print("[1/4] Scanning \"\(album)\"")
-        let census = try await Scan.census(album: album)
-        Scan.report(census, album: album)
+        print("[1/4] Scanning \(source.displayName)")
+        let census = try await Scan.census(source: source)
+        Scan.report(census, album: source.displayName)
         guard census.eligible > 0 else {
-            print("\nNothing in \"\(album)\" can be converted. Stopping.")
+            print("\nNothing in \(source.displayName) can be converted. Stopping.")
             return
         }
 
@@ -90,17 +91,18 @@ struct Convert: AsyncParsableCommand {
             return
         }
 
-        print("\n[4/4] \(dryRun ? "Planning the import" : "Adding copies to \"\(destAlbum)\"")")
+        let where_ = destAlbum.map { "\"\($0)\"" } ?? "the workspace"
+        print("\n[4/4] \(dryRun ? "Planning the import" : "Adding copies to \(where_)")")
         try await apply.run()
     }
 
     func transcodeArguments() -> [String] {
         var arguments = [
             "--out", staging.out,
-            "--album", album,
             "--max-download-gb", "\(maxDownloadGB)",
             "--chained",
         ]
+        arguments += source.forwardedArguments
         arguments += gateArguments()
         if let limit { arguments += ["--limit", "\(limit)"] }
         return arguments
@@ -109,10 +111,10 @@ struct Convert: AsyncParsableCommand {
     func applyArguments() -> [String] {
         var arguments = [
             "--out", staging.out,
-            "--album", album,
-            "--dest-album", destAlbum,
             "--chained",
         ]
+        arguments += source.forwardedArguments
+        if let destAlbum { arguments += ["--dest-album", destAlbum] }
         arguments += gateArguments()
         if let limit { arguments += ["--limit", "\(limit)"] }
         // The chain's whole premise: the user already confirmed by typing

@@ -41,10 +41,25 @@ final class PhotosScriptingTests: XCTestCase {
 
     // MARK: - Script generation
 
-    func testAlbumNameIsEscapedInReadScript() {
-        let script = PhotosScripting.readScript(album: #"My "Best" Album"#)
-        XCTAssertTrue(script.contains(#"name of a is "My \"Best\" Album""#))
+    func testReadScriptAddressesEachAssetByIdentifier() {
+        let script = PhotosScripting.readScript(for: ["A/L0/001", "B/L0/001"])
+        XCTAssertTrue(script.contains(#"set m to media item id "A/L0/001""#))
+        XCTAssertTrue(script.contains(#"set m to media item id "B/L0/001""#))
         XCTAssertTrue(script.contains("return outList"))
+    }
+
+    /// Reading must not depend on an album title, which the workspace made
+    /// ambiguous: the same two names repeat in every month's folder.
+    func testReadScriptNeverLooksAnAlbumUpByName() {
+        let script = PhotosScripting.readScript(for: ["A/L0/001"])
+        XCTAssertFalse(script.contains("albums"))
+        XCTAssertFalse(script.contains("name of a"))
+    }
+
+    /// One unreachable asset must not cost the rest of the batch.
+    func testReadScriptGuardsEachAssetSeparately() {
+        let script = PhotosScripting.readScript(for: ["A/L0/001", "B/L0/001", "C/L0/001"])
+        XCTAssertEqual(script.components(separatedBy: "end try").count - 1, 3 * 4)
     }
 
     func testWriteScriptSetsOnlyTheThreeProperties() {
@@ -115,7 +130,7 @@ final class PhotosScriptingTests: XCTestCase {
     }
 
     func testGeneratedReadScriptCompiles() throws {
-        try assertCompiles(PhotosScripting.readScript(album: #"Album with "quotes""#))
+        try assertCompiles(PhotosScripting.readScript(for: ["A/L0/001", "B/L0/001"]))
     }
 
     func testGeneratedWriteScriptCompiles() throws {

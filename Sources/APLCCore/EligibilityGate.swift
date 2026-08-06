@@ -65,6 +65,10 @@ public enum SkipReason: String, Sendable, Codable, CaseIterable {
     case qualityBelowThreshold
     case alreadyApplied
     case transcodeFailed
+    /// Distinct from `alreadyApplied`, which is the ledger's answer about this
+    /// staging directory. This one is the library's answer about every run there
+    /// has ever been.
+    case duplicateInLibrary
 
     public var explanation: String {
         switch self {
@@ -84,6 +88,7 @@ public enum SkipReason: String, Sendable, Codable, CaseIterable {
         case .qualityBelowThreshold: return "SSIM below the configured threshold"
         case .alreadyApplied: return "already converted in a previous run"
         case .transcodeFailed: return "encoder returned an error"
+        case .duplicateInLibrary: return "a copy with the same filename and capture time is already in the library"
         }
     }
 }

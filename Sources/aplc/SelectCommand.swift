@@ -20,6 +20,11 @@ struct Select: AsyncParsableCommand {
             itself, so the answer survives deleting a staging folder or moving the
             copies into your Shared Library.
 
+            The album goes in "aplc workspace" > "YYYY-MM" > "Selected Originals",
+            so each month's work sits together and the rest of the pipeline can
+            find it from --year and --month alone. --album overrides that with a
+            flat album of your own naming.
+
             Re-running is safe: photos already in the album are not added twice.
 
             This is the only command that reads outside a named album, which it
@@ -34,8 +39,8 @@ struct Select: AsyncParsableCommand {
     @Option(help: "Month the photos were taken, 1 to 12.")
     var month: Int
 
-    @Option(help: "Title of the album to fill. Created if it does not exist.")
-    var album: String
+    @Option(help: "Fill this flat album instead of the workspace's month folder.")
+    var album: String?
 
     @Flag(help: "Print one line per photo instead of only the summary.")
     var verbose: Bool = false
@@ -47,6 +52,13 @@ struct Select: AsyncParsableCommand {
         guard (1...9999).contains(year) else {
             throw ValidationError("--year must be a four-digit year, not \(year).")
         }
+    }
+
+    /// Where the photos will go, spelled as the user would find it in Photos.
+    private var destinationName: String {
+        if let album { return "\"\(album)\"" }
+        let folder = WorkspaceLayout.monthFolder(MonthKey(year: year, month: month))
+        return "\(WorkspaceLayout.rootFolder) > \(folder) > \(WorkspaceLayout.originalsAlbum)"
     }
 
     func run() async throws {
@@ -84,11 +96,21 @@ struct Select: AsyncParsableCommand {
 
         guard !selection.candidates.isEmpty else {
             report(selection, label: label, alreadyInAlbum: 0, added: 0)
-            print("\nNothing in \(label) is left to convert. The album was not created.")
+            print("\nNothing in \(label) is left to convert. Nothing was created.")
             return
         }
 
-        let destination = try await Importer.ensureAlbum(titled: album)
+        // Created only now that there is something to put in it: an empty
+        // "2026-03" folder in the sidebar would be worse than no folder.
+        let destination: PHAssetCollection
+        if let album {
+            destination = try await Importer.ensureAlbum(titled: album)
+        } else {
+            destination = try await Importer.ensureWorkspaceAlbum(
+                WorkspaceLayout.originalsAlbum,
+                inFolderNamed: WorkspaceLayout.monthFolder(MonthKey(year: year, month: month))
+            )
+        }
         let existing = PhotoLibraryAccess.identifiers(in: destination)
         let toAdd = selection.candidates
             .filter { !existing.contains($0.localIdentifier) }
@@ -101,12 +123,13 @@ struct Select: AsyncParsableCommand {
                alreadyInAlbum: selection.candidates.count - toAdd.count,
                added: toAdd.count)
 
+        let next = album.map { "--album \"\($0)\"" } ?? "--year \(year) --month \(month)"
         print("""
 
             Your photos are untouched — an album holds references, not copies, and \
             nothing was deleted.
 
-            Next: aplc convert --album "\(album)" --out ./staging --dest-album "\(album) HEIC"
+            Next: aplc convert \(next) --out ./staging
             """)
     }
 
@@ -122,8 +145,8 @@ struct Select: AsyncParsableCommand {
             ("already HEIC", "\(selection.heicPresent)"),
             ("JPEGs already converted", "\(selection.alreadyConverted)"),
             ("JPEGs still to convert", "\(selection.candidates.count)"),
-            ("already in \"\(album)\"", "\(alreadyInAlbum)"),
-            ("added to \"\(album)\"", "\(added)"),
+            ("already in the album", "\(alreadyInAlbum)"),
+            ("added to \(destinationName)", "\(added)"),
         ]))
 
         let excluded = selection.skips.filter { $0.key != .alreadyApplied }

@@ -5,10 +5,14 @@ import UniformTypeIdentifiers
 /// Creates new HEIC assets in the photo library.
 ///
 /// This type is the *only* place in the project that writes to the library, and
-/// it is deliberately incapable of destruction: it creates assets and adds them
-/// to an album. `PHAssetChangeRequest.deleteAssets`, `contentEditingOutput` and
-/// `revertAssetContentToOriginal` appear nowhere in this package — a test in
-/// `SafetyInvariantTests` greps the sources to keep it that way.
+/// it is deliberately incapable of destruction: it creates assets, albums and
+/// folders, and puts things into them. `PHAssetChangeRequest.deleteAssets`,
+/// `contentEditingOutput` and `revertAssetContentToOriginal` appear nowhere in
+/// this package — a test in `SafetyInvariantTests` greps the sources to keep it
+/// that way, and the same test bans the calls that would unmake a folder.
+///
+/// Everything here is therefore additive and one-way. That is the trade the user
+/// chose: nothing can be lost, and nothing can be tidied away either.
 public enum Importer {
     /// Metadata carried from the source asset onto the new one.
     ///
@@ -30,14 +34,32 @@ public enum Importer {
     }
 
     /// Fetches the destination album, creating it if it does not exist yet.
-    public static func ensureAlbum(titled title: String) async throws -> PHAssetCollection {
-        if let existing = try? PhotoLibraryAccess.findAlbum(titled: title) {
+    ///
+    /// `folder` nil means the top of the sidebar, which is where an album named
+    /// by `--album` or `--dest-album` goes.
+    public static func ensureAlbum(
+        titled title: String,
+        in folder: PHCollectionList? = nil
+    ) async throws -> PHAssetCollection {
+        if let folder {
+            if let existing = try? PhotoLibraryAccess.findAlbum(titled: title, in: folder) {
+                return existing
+            }
+        } else if let existing = try? PhotoLibraryAccess.findAlbum(titled: title) {
             return existing
         }
+
         var placeholder: PHObjectPlaceholder?
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: title)
-            placeholder = request.placeholderForCreatedAssetCollection
+            let created = request.placeholderForCreatedAssetCollection
+            placeholder = created
+            // Same transaction as the creation, deliberately: an album exists at
+            // the top level until it is filed, so doing this in a second call
+            // leaves one stranded there if the run is interrupted between them.
+            if let folder, let parent = PHCollectionListChangeRequest(for: folder) {
+                parent.addChildCollections([created] as NSArray)
+            }
         }
         guard let id = placeholder?.localIdentifier,
               let created = PHAssetCollection.fetchAssetCollections(
@@ -47,6 +69,53 @@ public enum Importer {
             throw PhotoLibraryError.albumNotFound(title)
         }
         return created
+    }
+
+    /// Fetches a folder, creating it if it does not exist yet.
+    ///
+    /// Creating one is as far as this goes. `PHCollectionListChangeRequest` can
+    /// also delete a folder and empty it of albums, and those calls are on the
+    /// forbidden list in `SafetyInvariantTests` — so a folder this tool makes is
+    /// as one-way as an album it fills, and for the same reason.
+    public static func ensureFolder(
+        named name: String,
+        in parent: PHCollectionList? = nil
+    ) async throws -> PHCollectionList {
+        if let existing = try? PhotoLibraryAccess.findFolder(named: name, in: parent) {
+            return existing
+        }
+
+        var placeholder: PHObjectPlaceholder?
+        try await PHPhotoLibrary.shared().performChanges {
+            let request = PHCollectionListChangeRequest.creationRequestForCollectionList(withTitle: name)
+            let created = request.placeholderForCreatedCollectionList
+            placeholder = created
+            if let parent, let parentRequest = PHCollectionListChangeRequest(for: parent) {
+                parentRequest.addChildCollections([created] as NSArray)
+            }
+        }
+        guard let id = placeholder?.localIdentifier,
+              let created = PHCollectionList.fetchCollectionLists(
+                  withLocalIdentifiers: [id], options: nil
+              ).firstObject
+        else {
+            throw PhotoLibraryError.folderNotFound(name)
+        }
+        return created
+    }
+
+    /// Ensures `aplc workspace` > `2026-02` > *title*, creating whichever parts
+    /// are missing.
+    ///
+    /// Called only once a command knows it has something to put there: an empty
+    /// folder tree in the sidebar would be worse than none.
+    public static func ensureWorkspaceAlbum(
+        _ title: String,
+        inFolderNamed folder: String
+    ) async throws -> PHAssetCollection {
+        let root = try await ensureFolder(named: WorkspaceLayout.rootFolder)
+        let month = try await ensureFolder(named: folder, in: root)
+        return try await ensureAlbum(titled: title, in: month)
     }
 
     /// Adds photos that are already in the library to an album.

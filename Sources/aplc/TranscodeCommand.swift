@@ -21,8 +21,7 @@ struct Transcode: AsyncParsableCommand {
     @OptionGroup var staging: StagingOptions
     @OptionGroup var gate: GateOptions
 
-    @Option(help: "Title of the album to convert.")
-    var album: String
+    @OptionGroup var source: SourceAlbumOptions
 
     @Option(name: .customLong("max-download-gb"),
             help: "Ceiling on data pulled from iCloud, in GB. 0 refuses downloads entirely.")
@@ -36,12 +35,14 @@ struct Transcode: AsyncParsableCommand {
     @Flag(name: .customLong("chained"), help: .hidden)
     var chained: Bool = false
 
+    func validate() throws { try source.requireSelection() }
+
     func run() async throws {
         guard Transcoder.canWriteHEIC else {
             throw ValidationError("this system's ImageIO cannot write HEIC")
         }
         try await PhotoLibraryAccess.authorize()
-        let collection = try PhotoLibraryAccess.findAlbum(titled: album)
+        let collection = try source.resolve()
         let assets = PhotoLibraryAccess.imageAssets(in: collection)
 
         let ledger = try Ledger(url: staging.ledgerURL)
@@ -59,7 +60,9 @@ struct Transcode: AsyncParsableCommand {
             // asset per 20 ms, so a few thousand assets means minutes of silence
             // before the first conversion line appears.
             print("Reading keywords/title/caption for \(assets.count) assets from Photos...")
-            textMetadata = try await PhotosScripting.readTextMetadata(inAlbumTitled: album)
+            textMetadata = try await PhotosScripting.readTextMetadata(
+                forIdentifiers: assets.map(\.localIdentifier)
+            )
         } catch let error as PhotosScriptingError {
             textMetadataAvailable = false
             print("""

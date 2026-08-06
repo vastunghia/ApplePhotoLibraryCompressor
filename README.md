@@ -56,6 +56,14 @@ copies and leaves deletion to you, in Photos.app.
   photos into an album, which touches no photo and loses nothing. It is still a
   one-way door, because taking a photo back out of an album needs a call this
   tool does not contain; a wrong month is undone by hand in Photos.app.
+- **The albums and folders are one-way too.** `select` and `apply` create the
+  workspace folders as they need them, and nothing here can unmake one:
+  `deleteCollectionLists` and `removeChildCollections` are on the same forbidden
+  list as `deleteAssets`. Tidying the sidebar is your job, in Photos.app.
+- **A copy is never imported twice.** Before creating an asset, `apply` asks the
+  library — not its own ledger — whether a HEIC with that filename and that
+  capture second is already there. See
+  [Duplicates are refused at the door](#duplicates-are-refused-at-the-door).
 - **Everything is journalled** to an append-only, `fsync`ed JSONL ledger before
   any library write.
 
@@ -164,31 +172,37 @@ and the ledger still records what each new asset was meant to carry.
 
 ## Use
 
-Everything works on an album. Make one in Photos.app holding the photos you want
-to convert, or let `select` build it from a month of your library:
+Work through the library a month at a time. `select` gathers what that month
+still has left to convert, and every other command finds it from the same
+`--year` and `--month`:
 
 ```sh
-aplc select --year 2019 --month 7 --album "July 2019 to convert"
+aplc select --year 2019 --month 7
 ```
 
 Then either run the whole pipeline at once:
 
 ```sh
-aplc convert --album "My Album" --out ./staging --dest-album "Converted" --dry-run
-aplc convert --album "My Album" --out ./staging --dest-album "Converted" --limit 3
+aplc convert --year 2019 --month 7 --out ./staging --dry-run
+aplc convert --year 2019 --month 7 --out ./staging --limit 3
 ```
 
 or drive it a step at a time, which is the same work with a pause after each:
 
 ```sh
-aplc select    --year 2019 --month 7 --album "My Album"
-aplc scan      --album "My Album"
-aplc calibrate --album "My Album" --out ./staging
-aplc transcode --album "My Album" --out ./staging   # no --quality: chosen per photo
+aplc select    --year 2019 --month 7
+aplc scan      --year 2019 --month 7
+aplc calibrate --year 2019 --month 7 --out ./staging
+aplc transcode --year 2019 --month 7 --out ./staging   # no --quality: chosen per photo
 aplc verify    --out ./staging
-aplc apply     --album "My Album" --out ./staging --dest-album "Converted"   # dry run
-aplc apply     --album "My Album" --out ./staging --dest-album "Converted" --confirm --limit 3
+aplc apply     --year 2019 --month 7 --out ./staging             # dry run
+aplc apply     --year 2019 --month 7 --out ./staging --confirm --limit 3
 ```
+
+Every command also takes `--album "Some Album"` instead, for an album you made
+by hand; `apply` and `convert` take `--dest-album` to put the copies in one flat
+album rather than in the workspace. The two forms are alternatives — give one or
+the other.
 
 `convert` runs scan → transcode → verify → apply and stops before writing if the
 album holds nothing convertible, if the gate rejected everything, or if `verify`
@@ -199,7 +213,7 @@ nothing is imported twice.
 exploring from intending, and `convert` is the intending — you type it because
 you want the copies, and by the time it writes you have already spent the
 transcoding time. `--dry-run` is how you hold it back. Either way nothing is ever
-deleted: the worst case is copies in `--dest-album` that you remove by hand.
+deleted: the worst case is copies in the workspace that you remove by hand.
 
 Two steps stay manual, in Photos.app, in this order:
 
@@ -210,6 +224,19 @@ Two steps stay manual, in Photos.app, in this order:
 
 Doing them the other way round removes the originals for everyone they were shared
 with while leaving your copies personal.
+
+**Deleting from an album needs `Cmd+Backspace`, not `Backspace`.** This matters
+because step 2 has you working inside an album, and there plain `Backspace` only
+removes the photo *from the album* — the file stays, the space is not reclaimed,
+and Recently Deleted stays empty, so nothing tells you it did not happen. The two
+gestures are indistinguishable in the interface. Verified the hard way: a
+deletion that appeared to succeed left every file in place, and `select` went on
+counting them, correctly.
+
+Photos' **search is not a way to check** afterwards, either. Its index is a
+separate database rebuilt in the background while the Mac is idle, so a photo
+that is really there can be missing from search results for a while, and one that
+was deleted can linger. Trust the albums, not the search field.
 
 `calibrate` also works on plain files, needing no library access at all:
 
@@ -232,8 +259,8 @@ halves of the pair. Photos that were always HEIC pair with nothing, so they do n
 make their JPEG neighbours look converted.
 
 Both facts matter for what the answer survives. It does not depend on the staging
-folder, which you may delete; nor on the copies staying in `--dest-album`, which
-they will not once you move them into a Shared Library.
+folder, which you may delete; nor on the copies staying in the album `apply` put
+them in, which they will not once you move them into a Shared Library.
 
 That independence is the point, not a detail. The ledger that makes `apply`
 idempotent lives *inside* the staging folder, so it only knows about the
@@ -247,8 +274,8 @@ July 2019
   already HEIC                86
   JPEGs already converted     74
   JPEGs still to convert     240
-  already in "July 2019"       0
-  added to "July 2019"       240
+  already in the album         0
+  added to aplc workspace > 2019-07 > Selected Originals   240
 
 Why the rest are excluded
   notAJPEG        86  — original resource is not a JPEG
@@ -264,6 +291,65 @@ Photos that reach you through an iCloud **Shared Album** are never offered, and
 should not be: what a shared album holds is a downscaled copy belonging to whoever
 posted it, not an original of yours to re-encode. Assets in a Shared *Library* are
 a different thing — those are full originals, and they are included.
+
+### The workspace
+
+Both albums live in a folder tree that the tool builds as it goes:
+
+```
+aplc workspace
+├── 2019-06
+│   ├── Compressed Copies      the HEICs apply created
+│   └── Selected Originals     the JPEGs select found
+└── 2019-07
+    ├── Compressed Copies
+    └── Selected Originals
+```
+
+The folder is named after the tool rather than the work, so it is obvious in the
+sidebar that something else maintains it. The month folders are zero-padded
+because Photos sorts them as text, and `2019-7` would file July after October.
+
+**Copies are filed by the capture date of the original, not by when you converted
+them.** So an album spanning two months produces two destinations in one run,
+and a photo you convert next year still lands beside the JPEG it came from. A
+photo with no capture date at all goes to `aplc workspace > undated`, since
+filing it under some month would be inventing the one fact the tree is organised
+by.
+
+Nothing is created before there is something to put in it: a month with nothing
+left to convert leaves no empty folder behind.
+
+### Duplicates are refused at the door
+
+`apply` will not import a second copy of a photo it already imported, even from a
+staging directory that knows nothing about the first one. Before creating an
+asset it looks for a HEIC in the library with the same filename stem and the same
+capture second — the pair identity described above — and if it finds one:
+
+| What it finds | What it does |
+|---|---|
+| the same image, byte for byte | skips it, and says so |
+| a different image | asks you: `[y/N/a=all/q=quit]` |
+| a copy it cannot read | asks you, saying it could not compare |
+
+The comparison is dimensions first, which is free, then SHA-256 against the
+digest the ledger already holds. It is **strictly offline**: needing to compare
+is not a reason to pull a photo down from iCloud, so an existing copy that is not
+on disk becomes a question rather than a silent decision.
+
+Comparing bytes works because two things are true, both measured rather than
+assumed: the encoder is **deterministic** — the same photo at the same quality
+produces the same file, to the byte — and `PHAssetCreationRequest` stores the
+resource **verbatim**, so the copy in the library still hashes to what the ledger
+recorded for the file that made it. That is what puts the first row of the table
+in reach: a photo converted again the same way is recognised as the same photo,
+not merely as one with a matching name.
+
+Not importing is the default answer, because the two mistakes do not cost the
+same: a skip is undone by running the command again, a second copy is undone by
+hand in Photos.app. With no terminal attached — in a script, or a cron job —
+there is nobody to ask, so the question becomes a skip and is reported as one.
 
 ### Quality is chosen per photo, by `transcode`
 
@@ -330,13 +416,15 @@ Sources/APLCCore/          testable core
   QualityMetrics.swift     SSIM and PSNR, strip-processed to bound memory
   QualitySearch.swift      the encoder's real quality rungs, and the search
   CandidateSelection.swift what a month still has left to convert
+  DuplicateCheck.swift     whether a staged file is already in the library
+  WorkspaceLayout.swift    the folder and album names, in one place
   EligibilityGate.swift    the eight checks, as pure functions
   Ledger.swift             append-only journal, SHA-256 digests
-  PhotoLibraryAccess.swift authorisation, album lookup, metered export
+  PhotoLibraryAccess.swift authorisation, album and folder lookup, metered export
   PhotosScripting.swift    Apple Events for keywords, title and caption
-  Importer.swift           the only code that writes assets to the library
+  Importer.swift           the only code that writes to the library
 Sources/aplc/              CLI subcommands
-Tests/APLCCoreTests/       73 tests, no photo library required
+Tests/APLCCoreTests/       110 tests, no photo library required
 ```
 
 ## Tests

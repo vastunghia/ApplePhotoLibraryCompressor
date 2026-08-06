@@ -16,20 +16,22 @@ struct Scan: AsyncParsableCommand {
             """
     )
 
-    @Option(help: "Title of the album to examine.")
-    var album: String
+    @OptionGroup var source: SourceAlbumOptions
 
     @Flag(help: "Print one line per asset instead of only the summary.")
     var verbose: Bool = false
 
+    func validate() throws { try source.requireSelection() }
+
     func run() async throws {
-        let census = try await Self.census(album: album, verbose: verbose)
-        Self.report(census, album: album)
+        let census = try await Self.census(source: source, verbose: verbose)
+        Self.report(census, album: source.displayName)
 
         if census.eligible > 0 {
+            let next = source.forwardedArguments.joined(separator: " ")
             print("""
 
-                Next: aplc calibrate --album "\(album)" --out ./staging
+                Next: aplc calibrate \(next) --out ./staging
                 """)
         }
     }
@@ -43,9 +45,9 @@ struct Scan: AsyncParsableCommand {
     /// Shared with `convert`, which needs the counts rather than the printout —
     /// the same split as `Verify.verify`, and for the same reason: one census,
     /// two callers, no second implementation to drift.
-    static func census(album: String, verbose: Bool = false) async throws -> Census {
+    static func census(source: SourceAlbumOptions, verbose: Bool = false) async throws -> Census {
         try await PhotoLibraryAccess.authorize()
-        let collection = try PhotoLibraryAccess.findAlbum(titled: album)
+        let collection = try source.resolve()
         let assets = PhotoLibraryAccess.imageAssets(in: collection)
 
         var census = Census(total: assets.count)
@@ -69,7 +71,7 @@ struct Scan: AsyncParsableCommand {
     }
 
     static func report(_ census: Census, album: String) {
-        print("\nAlbum \"\(album)\"")
+        print("\nAlbum \(album)")
         print(Format.table([
             ("images in album", "\(census.total)"),
             ("convertible", "\(census.eligible)"),
