@@ -136,12 +136,21 @@ public enum Importer {
         case stagedFileNotHEIC(URL)
         case stagedFileMissing(URL)
         case creationReturnedNoIdentifier
+        case photosImportedNothing(String)
+        case photosImportedMoreThanOne(String, count: Int)
+        case createdAssetNotFound(String)
 
         public var description: String {
             switch self {
             case .stagedFileNotHEIC(let u): return "refusing to import non-HEIC file: \(u.path)"
             case .stagedFileMissing(let u): return "staged file is missing: \(u.path)"
             case .creationReturnedNoIdentifier: return "asset was created but no identifier came back"
+            case .photosImportedNothing(let name):
+                return "Photos imported nothing for \(name)"
+            case .photosImportedMoreThanOne(let name, let count):
+                return "Photos returned \(count) assets for the one file \(name)"
+            case .createdAssetNotFound(let id):
+                return "Photos reported creating \(id), but it cannot be fetched"
             }
         }
     }
@@ -196,5 +205,129 @@ public enum Importer {
             throw ImportError.creationReturnedNoIdentifier
         }
         return identifier
+    }
+
+    // MARK: - The same thing, through Photos.app
+
+    /// Adds a staged HEIC by asking Photos.app to import it, rather than by
+    /// creating the asset ourselves.
+    ///
+    /// The difference this buys is entirely in what Photos records about the
+    /// asset afterwards: an import session, so the copy appears under
+    /// Collections > Other > Imports beside its neighbours, and an "added by"
+    /// attribution. `PHAssetCreationRequest` sets neither, and PhotoKit exposes
+    /// no way to set them — measured, not assumed: nothing in the framework's
+    /// headers or its symbol table mentions either field.
+    ///
+    /// What it costs is that Photos, not us, reads the two facts that identify a
+    /// converted copy. Both are given back afterwards rather than hoped for:
+    ///
+    /// - **The filename** comes from the file on disk, so the staged file is
+    ///   copied to one named `originalFilename` first. The copy is what makes
+    ///   this safe to do inside a staging directory whose files are named by
+    ///   local identifier.
+    /// - **The capture date** comes from the file's EXIF, which the transcoder
+    ///   does preserve — but Photos' own date is authoritative and can differ
+    ///   from it, for a date corrected by hand or a photo that never had one. So
+    ///   it is set explicitly afterwards, exactly as `createAsset` sets it, and
+    ///   the pairing rule keeps the same guarantee on both paths.
+    ///
+    /// The album is joined through PhotoKit rather than through the `into`
+    /// parameter Photos offers, because that one takes an album by object and
+    /// album titles no longer identify albums.
+    /// Copies a staged file to one named the way the asset should be named, and
+    /// returns where it put it.
+    ///
+    /// Separate from the import itself because the import is batched: every file
+    /// in a run is prepared first, then all of them are handed over at once.
+    public static func prepareForPhotosImport(
+        stagedHEIC staged: URL,
+        originalFilename: String
+    ) throws -> URL {
+        guard FileManager.default.fileExists(atPath: staged.path) else {
+            throw ImportError.stagedFileMissing(staged)
+        }
+        // Re-check the file type at the last possible moment, exactly as the
+        // PhotoKit path does: only an actual HEIC gets offered to the library.
+        let facts = try ImageProbe.probe(staged)
+        guard let uti = facts.typeIdentifier, UTType(uti) == .heic else {
+            throw ImportError.stagedFileNotHEIC(staged)
+        }
+
+        // A directory of its own per asset: the staged stem is the local
+        // identifier and so unique, whereas two photos from different months can
+        // share an original filename and would otherwise collide here.
+        let directory = staged.deletingLastPathComponent()
+            .appendingPathComponent("import", isDirectory: true)
+            .appendingPathComponent(staged.deletingPathExtension().lastPathComponent,
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let named = directory.appendingPathComponent(originalFilename)
+        if FileManager.default.fileExists(atPath: named.path) {
+            try FileManager.default.removeItem(at: named)
+        }
+        // Copy, never move — the staged file stays as the safety net, the same
+        // rule `shouldMoveFile = false` states on the PhotoKit path.
+        try FileManager.default.copyItem(at: staged, to: named)
+        return named
+    }
+
+    /// Asks Photos to import every prepared file in one go, and says which
+    /// identifier each filename became.
+    ///
+    /// Matched by filename rather than by position: Photos' reply carries each
+    /// item's `filename`, and nothing in the dictionary promises the order of
+    /// the list it returns. A filename that comes back twice is refused rather
+    /// than guessed at — mapping the wrong identifier to a photo would put
+    /// another photo's metadata on it.
+    public static func importViaPhotosApp(_ files: [URL]) async throws -> [String: String] {
+        guard !files.isEmpty else { return [:] }
+        let items = try await MainActor.run { try PhotosScripting.importFiles(files) }
+
+        var byFilename: [String: String] = [:]
+        for item in items {
+            if byFilename.updateValue(item.identifier, forKey: item.filename) != nil {
+                throw ImportError.photosImportedMoreThanOne(item.filename, count: 2)
+            }
+        }
+        return byFilename
+    }
+
+    /// Finishes one asset Photos has just imported: sets what PhotoKit will
+    /// accept, and files it in its album.
+    ///
+    /// The capture date is the reason this step is not optional. Photos reads it
+    /// from the file's EXIF, which the transcoder does preserve — but Photos' own
+    /// date is authoritative and can differ, for a date corrected by hand or a
+    /// photo that never had one in the file. Setting it explicitly keeps the
+    /// pairing rule identical on both import routes.
+    public static func adoptImportedAsset(
+        _ identifier: String,
+        metadata: CarriedMetadata,
+        into album: PHAssetCollection
+    ) async throws {
+        guard let asset = PHAsset.fetchAssets(
+            withLocalIdentifiers: [identifier], options: nil
+        ).firstObject else {
+            throw ImportError.createdAssetNotFound(identifier)
+        }
+        try await applyMetadata(metadata, to: asset)
+        try await add([asset], to: album)
+    }
+
+    /// Sets on an existing asset the four properties PhotoKit will accept.
+    ///
+    /// Only reachable from the Photos.app import path, which has no way to pass
+    /// them at creation time. These are the whole writable surface of
+    /// `PHAssetChangeRequest` bar `contentEditingOutput`, which is forbidden here
+    /// because it replaces a rendition rather than adding one.
+    static func applyMetadata(_ metadata: CarriedMetadata, to asset: PHAsset) async throws {
+        try await PHPhotoLibrary.shared().performChanges {
+            let request = PHAssetChangeRequest(for: asset)
+            request.creationDate = metadata.creationDate
+            request.location = metadata.location
+            request.isFavorite = metadata.isFavorite
+            request.isHidden = metadata.isHidden
+        }
     }
 }

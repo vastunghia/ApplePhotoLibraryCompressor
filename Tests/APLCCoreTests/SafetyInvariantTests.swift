@@ -83,9 +83,15 @@ final class SafetyInvariantTests: XCTestCase {
         }
     }
 
+    /// Word-boundary matched so "deleted" inside a string would not trip it, and
+    /// so `description` does not read as a hit for some substring.
+    private func words(of script: String) -> [String] {
+        script.components(separatedBy: CharacterSet.alphanumerics.inverted).map { $0.lowercased() }
+    }
+
     /// Apple Events are a second route into the library, and Photos' dictionary
-    /// exposes destructive verbs there too. The generated scripts must only ever
-    /// set the three text properties.
+    /// exposes destructive verbs there too. The text scripts must only ever set
+    /// the three text properties.
     func testGeneratedAppleScriptsAreNonDestructive() {
         let scripts = [
             PhotosScripting.readScript(for: ["A/L0/001"]),
@@ -94,19 +100,50 @@ final class SafetyInvariantTests: XCTestCase {
             ]),
         ]
 
-        // Word-boundary matched so "deleted" inside a string would not trip it,
-        // and so `description` does not read as a hit for some substring.
-        let destructiveVerbs = ["delete", "remove", "duplicate", "move", "import", "export"]
+        let forbiddenVerbs = ["delete", "remove", "duplicate", "move", "import", "export"]
 
         for script in scripts {
-            let words = script
-                .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .map { $0.lowercased() }
-            for verb in destructiveVerbs {
-                XCTAssertFalse(words.contains(verb),
+            let found = words(of: script)
+            for verb in forbiddenVerbs {
+                XCTAssertFalse(found.contains(verb),
                                "generated AppleScript uses the verb \"\(verb)\":\n\(script)")
             }
         }
+    }
+
+    /// `import` is the one verb allowed out of that list, in the one script that
+    /// exists to use it — and the exception is narrow on purpose.
+    ///
+    /// It was on the list as a write path outside the audited one, not as
+    /// something that can destroy: `import` only ever adds an asset. The property
+    /// the list protects — that nothing here can lose a photo — is untouched, and
+    /// every verb that *could* lose one stays banned in this script too.
+    func testTheImportScriptUsesImportAndNothingElseFromTheBannedList() {
+        let script = PhotosScripting.importScript(for: [URL(fileURLWithPath: "/tmp/a.heic")])
+        let found = words(of: script)
+
+        XCTAssertTrue(found.contains("import"), "the import script should import:\n\(script)")
+        for verb in ["delete", "remove", "duplicate", "move", "export"] {
+            XCTAssertFalse(found.contains(verb),
+                           "the import script uses the verb \"\(verb)\":\n\(script)")
+        }
+    }
+
+    /// It hands Photos files and reads identifiers back. It must not reach for a
+    /// `media item` to change, nor name an album — album titles stopped
+    /// identifying albums when the workspace began repeating them per month, so
+    /// `into` is deliberately not used.
+    func testTheImportScriptAssignsNothingToAMediaItemAndNamesNoAlbum() {
+        let script = PhotosScripting.importScript(for: [URL(fileURLWithPath: "/tmp/a.heic")])
+
+        for line in script.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("set ") else { continue }
+            XCTAssertFalse(trimmed.contains(" of m to "),
+                           "the import script assigns to a media item: \(trimmed)")
+        }
+        XCTAssertFalse(words(of: script).contains("album"),
+                       "the import script names an album:\n\(script)")
     }
 
     /// Whatever else changes, these are the only properties we may assign.

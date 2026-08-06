@@ -26,16 +26,29 @@ public final class StagingArea {
         // `URL(fileURLWithPath:)` decides by asking the filesystem, so the same
         // directory comes back with a trailing slash once it exists and without
         // one before — and two areas on the same root compare unequal.
+        let requested: URL
         if let path {
-            root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            requested = URL(fileURLWithPath: path, isDirectory: true)
             isTemporary = false
         } else {
-            root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            requested = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 .appendingPathComponent("aplc-\(UUID().uuidString)", isDirectory: true)
-                .standardizedFileURL
             isTemporary = true
         }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // Created *before* the path is canonicalised, and that order is the whole
+        // point. Neither `standardizedFileURL` nor `resolvingSymlinksInPath` is a
+        // pure function of the string: both consult the filesystem, and both give
+        // a different answer for a directory that does not exist yet. Getting
+        // this wrong is not cosmetic — `transcode` records staged paths under the
+        // root it computed, `apply` matches them against the root *it* computed,
+        // and if one ran before the directory existed and the other after, the
+        // two disagree by a leading "/private" and `apply` finds nothing staged.
+        try FileManager.default.createDirectory(at: requested, withIntermediateDirectories: true)
+
+        // Resolved rather than standardized: this is the physical path, which is
+        // what every later comparison against a recorded path will be made of.
+        root = requested.resolvingSymlinksInPath()
     }
 
     public var heicDirectory: URL { root.appendingPathComponent("heic") }

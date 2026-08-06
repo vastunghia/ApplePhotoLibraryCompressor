@@ -59,6 +59,10 @@ struct Convert: AsyncParsableCommand {
           help: "Do everything except write to the library.")
     var dryRun: Bool = false
 
+    @Flag(name: .customLong("import-via-applescript"),
+          help: "Let Photos.app import the file, so it gets an import session.")
+    var importViaAppleScript: Bool = false
+
     func validate() throws { try source.requireSelection() }
 
     func run() async throws {
@@ -148,6 +152,7 @@ struct Convert: AsyncParsableCommand {
         ]
         arguments += source.forwardedArguments
         if let destAlbum { arguments += ["--dest-album", destAlbum] }
+        if importViaAppleScript { arguments.append("--import-via-applescript") }
         arguments += gateArguments()
         if let limit { arguments += ["--limit", "\(limit)"] }
         // The chain's whole premise: the user already confirmed by typing

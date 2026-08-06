@@ -232,6 +232,91 @@ public enum PhotosScripting {
             """
     }
 
+    // MARK: - Importing
+
+    /// Hands files to Photos to import, and returns the identifiers it made.
+    ///
+    /// This is the *second* way into the library, and the only one that is not
+    /// `PHAssetCreationRequest`. It exists because an asset created through
+    /// PhotoKit belongs to no import session — `ZASSET.ZIMPORTSESSION` is null —
+    /// so it never appears under Collections > Other > Imports, and carries no
+    /// "added by" attribution. Photos' own import sets both.
+    ///
+    /// Two deliberate choices, both of which the caller depends on:
+    ///
+    /// - **No `into` parameter**, though the dictionary offers one. It takes an
+    ///   `album` object, and album titles stopped identifying albums when the
+    ///   workspace began repeating them per month. The caller adds the returned
+    ///   assets to the album through PhotoKit instead, by identifier.
+    /// - **`skip check duplicates` is true.** `DuplicateCheck` has already asked
+    ///   the library and, where it was uncertain, asked the user. Letting Photos
+    ///   apply a second and different rule would mean an import silently coming
+    ///   back empty, which reads exactly like a failure.
+    ///
+    /// Photos takes the asset's filename from the file on disk, so the caller
+    /// must name it before calling. Nothing here can set it afterwards.
+    /// What one imported file came back as.
+    public struct ImportedItem: Sendable, Equatable {
+        public let identifier: String
+        /// Photos' own `filename`, which is the name of the file we handed it.
+        /// Carried so the caller can match results to inputs without trusting
+        /// the order of the reply.
+        public let filename: String
+    }
+
+    /// Hands *every* file to Photos in as few `import` calls as possible.
+    ///
+    /// Batching is not a performance nicety here: one `import` is one import
+    /// session, so a call per photo would fill Collections > Other > Imports
+    /// with one single-photo event per conversion — worse than the PhotoKit
+    /// path, which at least leaves that view alone. A month's conversion should
+    /// read as one import, because that is what it was.
+    ///
+    /// The chunking still applies, so a run longer than `batchSize` photos
+    /// becomes that many sessions rather than one. That is the honest cost of
+    /// not handing AppleScript a list literal of unbounded length.
+    @MainActor
+    public static func importFiles(_ urls: [URL]) throws -> [ImportedItem] {
+        guard !urls.isEmpty else { return [] }
+
+        var items: [ImportedItem] = []
+        for chunk in stride(from: 0, to: urls.count, by: batchSize).map({
+            Array(urls[$0..<min($0 + batchSize, urls.count)])
+        }) {
+            let descriptor = try run(importScript(for: chunk))
+            guard descriptor.numberOfItems > 0 else { continue }
+            for index in 1...descriptor.numberOfItems {
+                guard let row = descriptor.atIndex(index), row.numberOfItems >= 2,
+                      let identifier = row.atIndex(1)?.stringValue,
+                      let filename = row.atIndex(2)?.stringValue
+                else {
+                    throw PhotosScriptingError.unexpectedResult(
+                        "import returned a row without an id and a filename")
+                }
+                items.append(ImportedItem(identifier: identifier, filename: filename))
+            }
+        }
+        return items
+    }
+
+    static func importScript(for urls: [URL]) -> String {
+        // The file list is built outside the tell block: `POSIX file` is a
+        // language construct rather than one of Photos' verbs, and it reads
+        // more predictably where Photos' own terminology is not in scope.
+        let files = urls.map { "POSIX file \(literal($0.path))" }.joined(separator: ", ")
+        return """
+            set theFiles to {\(files)}
+            tell application "Photos"
+                set outList to {}
+                set imported to import theFiles skip check duplicates true
+                repeat with m in imported
+                    set end of outList to {id of m, filename of m}
+                end repeat
+                return outList
+            end tell
+            """
+    }
+
     // MARK: - Plumbing
 
     /// Renders a Swift string as an AppleScript string literal.

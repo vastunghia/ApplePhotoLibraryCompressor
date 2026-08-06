@@ -181,4 +181,58 @@ final class PhotosScriptingTests: XCTestCase {
         XCTAssertEqual(entry?.sourceTextMetadata, metadata)
         XCTAssertEqual(entry?.appliedTextMetadata, metadata)
     }
+    // MARK: - The import script
+
+    func testTheImportScriptListsEveryFileAsAPOSIXPath() {
+        let script = PhotosScripting.importScript(for: [
+            URL(fileURLWithPath: "/tmp/a/IMG_1.heic"),
+            URL(fileURLWithPath: "/tmp/b/IMG_2.heic"),
+        ])
+        XCTAssertTrue(script.contains("POSIX file \"/tmp/a/IMG_1.heic\""), script)
+        XCTAssertTrue(script.contains("POSIX file \"/tmp/b/IMG_2.heic\""), script)
+    }
+
+    /// A quote or a backslash in a path must not end the literal early. Photos
+    /// would either fail to compile the script or, worse, be handed a different
+    /// path than the one intended.
+    func testAPathWithAQuoteIsEscaped() {
+        let script = PhotosScripting.importScript(for: [
+            URL(fileURLWithPath: "/tmp/it\"s/a.heic")
+        ])
+        XCTAssertTrue(script.contains("\\\""), script)
+        XCTAssertEqual(script.components(separatedBy: "POSIX file").count - 1, 1)
+    }
+
+    /// Photos applies its own duplicate rule otherwise, and an import that comes
+    /// back empty is indistinguishable from one that failed. `DuplicateCheck` has
+    /// already asked the library, and asked the user where it was unsure.
+    func testTheImportScriptLeavesDuplicateCheckingToUs() {
+        let script = PhotosScripting.importScript(for: [URL(fileURLWithPath: "/tmp/a.heic")])
+        XCTAssertTrue(script.contains("skip check duplicates true"), script)
+    }
+
+    /// The identifiers come back in the reply, which is the only reason this can
+    /// be used at all: without them there would be no way to set the capture date
+    /// afterwards or to file the copy in its album.
+    ///
+    /// The filename comes back with them because nothing in Photos' dictionary
+    /// promises the order of the returned list, and matching results to inputs by
+    /// position would put one photo's metadata on another.
+    func testTheImportScriptReturnsIdentifiersAndFilenames() {
+        let script = PhotosScripting.importScript(for: [URL(fileURLWithPath: "/tmp/a.heic")])
+        XCTAssertTrue(script.contains("set end of outList to {id of m, filename of m}"), script)
+        XCTAssertTrue(script.contains("return outList"), script)
+    }
+
+    /// One `import` is one import session. A script per file would give a month's
+    /// conversion one single-photo entry under Imports for every photo, which is
+    /// the opposite of what the feature is for.
+    func testEveryFileGoesIntoASingleImportCall() {
+        let urls = (1...20).map { URL(fileURLWithPath: "/tmp/IMG_\($0).heic") }
+        let script = PhotosScripting.importScript(for: urls)
+
+        XCTAssertEqual(script.components(separatedBy: " import ").count - 1, 1, script)
+        XCTAssertEqual(script.components(separatedBy: "POSIX file").count - 1, 20)
+    }
+
 }

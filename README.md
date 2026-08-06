@@ -373,6 +373,42 @@ same standard as having made one. Photos converted before you started using this
 tool will never appear in it either. Use `select`'s "JPEGs already converted"
 count for those; it answers the wider question.
 
+### Two ways in, and why you might pick the second
+
+An asset created through `PHAssetCreationRequest` belongs to no import session:
+Photos records that in `ZASSET.ZIMPORTSESSION`, and with nothing there the copy
+never appears under **Collections > Other > Imports**. PhotoKit offers no way to
+set it — not in the public headers, and not in the framework's symbol table.
+
+`--import-via-applescript` asks Photos.app to import the file instead, through
+the `import` command in its scripting dictionary. Measured on a real library:
+
+| | default (PhotoKit) | `--import-via-applescript` |
+|---|---|---|
+| **Under Imports** | no | **yes**, as one entry per run |
+| In a Shared Library | no | no — unchanged |
+| Filename | preserved | preserved, Photos does not rename |
+| Capture date | exact | exact |
+
+**That first row is the whole of it.** The two routes also write different values
+into the database's `ZIMPORTEDBY` columns, but Photos' Info panel does not show
+them, so it is not a difference you can see.
+
+The Shared Library row is the one worth reading twice. If the line you are
+missing says *"Added to library by <a person's name>"*, that is iCloud Shared
+Photo Library membership, and **neither route sets it** — no supported API can.
+Moving the copies in Photos.app is still the only way.
+
+The whole run is handed over in **one** `import` call, so a month's conversion
+reads as a single import event. That is not a performance detail: one call is one
+session, so importing photo by photo would fill the Imports view with a
+single-photo entry per conversion — worse than leaving it alone.
+
+It is off by default. It needs the optional **Automation → Photos** consent to
+become mandatory, and it hands Photos the reading of the filename, which the
+default route sets itself. Whether one line in Collections is worth that is
+exactly the kind of thing only you can decide, which is why it is a switch.
+
 ### Duplicates are refused at the door
 
 `apply` will not import a second copy of a photo it already imported, even when

@@ -45,6 +45,16 @@ struct Apply: AsyncParsableCommand {
     @Option(help: "Apply at most this many assets.")
     var limit: Int?
 
+    // An asset created through PhotoKit belongs to no import session, so it
+    // never shows under Collections > Other > Imports and carries no "added by"
+    // line. Asking Photos to import the file instead sets both. Off by default
+    // because it makes Automation consent mandatory rather than optional, and
+    // because it hands Photos the reading of the filename — see
+    // `Importer.createAssetViaPhotosApp`.
+    @Flag(name: .customLong("import-via-applescript"),
+          help: "Let Photos.app import the file, so it gets an import session.")
+    var importViaAppleScript: Bool = false
+
     // Set by `convert`. Only affects wording: inside the chain the command to
     // re-run is `convert`, not `apply`.
     @Flag(name: .customLong("chained"), help: .hidden)
@@ -110,6 +120,7 @@ struct Apply: AsyncParsableCommand {
             ("added to the library now", Format.bytes(addedBytes)),
             ("recoverable once you delete the JPEGs", Format.bytes(savedBytes)),
             ("destination", destinationDescription),
+            ("import route", importViaAppleScript ? "Photos.app (AppleScript)" : "PhotoKit"),
         ]))
 
         guard confirm else {
@@ -203,6 +214,11 @@ struct Apply: AsyncParsableCommand {
         /// New asset identifier -> the metadata it should end up carrying.
         var pendingText: [String: AssetTextMetadata] = [:]
         var createdFilenames: [String: String] = [:]
+        /// Cleared the duplicate check and is to be imported. Gathered rather
+        /// than imported on the spot so the Photos.app route can batch; a `q`
+        /// part-way through still imports everything answered for before it,
+        /// which is what stopping ought to mean.
+        var accepted: [Accepted] = []
 
         for entry in planned {
             if stopped { break }
@@ -309,14 +325,71 @@ struct Apply: AsyncParsableCommand {
                 }
             }
 
+            // Accepted. The import itself happens after this loop, because the
+            // Photos.app route must hand over every file in one call: one
+            // `import` is one import session, and a call per photo would fill
+            // Collections > Other > Imports with one single-photo event each.
+            let heicName = heicFilename(from: entry.originalFilename)
+            var prepared: URL?
+            if importViaAppleScript {
+                do {
+                    prepared = try Importer.prepareForPhotosImport(
+                        stagedHEIC: URL(fileURLWithPath: stagedPath),
+                        originalFilename: heicName
+                    )
+                } catch {
+                    failed += 1
+                    try ledger.append(LedgerEntry(
+                        outcome: .failed,
+                        sourceLocalIdentifier: entry.sourceLocalIdentifier,
+                        originalFilename: entry.originalFilename,
+                        error: "\(error)"
+                    ))
+                    print("  FAILED   \(entry.originalFilename): \(error)")
+                    continue
+                }
+            }
+            accepted.append(Accepted(entry: entry, sourceAsset: sourceAsset, folder: folder,
+                                     heicName: heicName, preparedFile: prepared,
+                                     stagedPath: stagedPath))
+        }
+
+        // One import for the whole run, so the copies read as a single import
+        // event rather than as one per photo.
+        var identifiersByFilename: [String: String] = [:]
+        if importViaAppleScript, !accepted.isEmpty {
+            let files = accepted.compactMap(\.preparedFile)
+            print("  handing \(files.count) file(s) to Photos as one import...")
+            identifiersByFilename = try await Importer.importViaPhotosApp(files)
+        }
+
+        for item in accepted {
+            let entry = item.entry
+            let sourceAsset = item.sourceAsset
+            let folder = item.folder
+            let stagedPath = item.stagedPath
+
             do {
                 let album = try await destination(forFolderNamed: folder)
-                let identifier = try await Importer.createAsset(
-                    fromStagedHEIC: URL(fileURLWithPath: stagedPath),
-                    originalFilename: heicFilename(from: entry.originalFilename),
-                    metadata: Importer.CarriedMetadata(from: sourceAsset),
-                    into: album
-                )
+                let identifier: String
+                if importViaAppleScript {
+                    guard let imported = identifiersByFilename[item.heicName] else {
+                        throw Importer.ImportError.photosImportedNothing(item.heicName)
+                    }
+                    try await Importer.adoptImportedAsset(
+                        imported,
+                        metadata: Importer.CarriedMetadata(from: sourceAsset),
+                        into: album
+                    )
+                    identifier = imported
+                } else {
+                    identifier = try await Importer.createAsset(
+                        fromStagedHEIC: URL(fileURLWithPath: stagedPath),
+                        originalFilename: item.heicName,
+                        metadata: Importer.CarriedMetadata(from: sourceAsset),
+                        into: album
+                    )
+                }
                 created += 1
                 perDestination[destAlbum ?? folder, default: 0] += 1
                 // Gathered, not filed yet: one `add` per month at the end beats
@@ -445,6 +518,18 @@ struct Apply: AsyncParsableCommand {
                 nothing tells you it did not happen.
                 """)
         }
+    }
+
+    /// One photo that passed every gate and is waiting to be imported.
+    private struct Accepted {
+        let entry: LedgerEntry
+        let sourceAsset: PHAsset
+        let folder: String
+        let heicName: String
+        /// Only on the Photos.app route: the copy named as the asset should be,
+        /// since Photos takes the filename from the file.
+        let preparedFile: URL?
+        let stagedPath: String
     }
 
     // MARK: - Duplicates
