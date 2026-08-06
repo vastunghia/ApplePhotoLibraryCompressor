@@ -50,8 +50,9 @@ copies and leaves deletion to you, in Photos.app.
 - **Two commands can create assets, and both refuse to start if `verify` reports
   a problem.** `apply` is a dry run unless you pass `--confirm`; `convert`, the
   one-shot pipeline, treats being invoked as the confirmation and takes
-  `--dry-run` instead. Both are idempotent via the ledger, and neither can do
-  anything but add.
+  `--dry-run` instead. Both are idempotent — and idempotent against the
+  *library*, not against their own journal — and neither can do anything but
+  add.
 - **In month mode every command writes album membership** — putting existing
   photos into `Selected Originals`, which touches no photo and loses nothing.
   `scan` and `calibrate` are therefore not read-only with `--year`/`--month`;
@@ -224,6 +225,15 @@ which new asset each conversion became. That record is the point: a journal that
 died with a staging folder could not tell you that a photo had already been
 converted three months ago, and that is precisely how this library came to hold
 two and three HEIC copies of some photos.
+
+**The journal records; the library decides.** It is not consulted as an
+authority on what is converted, and this matters the moment you delete a copy:
+the journal goes on naming that conversion for ever, so on its own it would
+refuse to convert a photo whose HEIC you have since thrown away — while `select`,
+which asks the library, would keep offering it. Every entry names the asset it
+created, and that claim is checked against the library before it is allowed to
+stop any work. Delete every copy you have made and the tool will offer them all
+again, which is the right answer.
 
 It is read leniently. A line left half-written by a hard stop is skipped and
 counted, never allowed to make the file unreadable — the whole file is the only

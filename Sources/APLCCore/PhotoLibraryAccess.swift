@@ -152,6 +152,20 @@ public enum PhotoLibraryAccess {
         return identifiers
     }
 
+    /// Which of these identifiers still name an asset in the library.
+    ///
+    /// One fetch for the whole set rather than one each, since the journal can
+    /// name every conversion ever made. An asset in Recently Deleted does not
+    /// count as surviving: it is on its way out, and it is invisible to the
+    /// duplicate check too, so treating it as gone keeps the two agreeing.
+    public static func existingIdentifiers(among identifiers: [String]) -> Set<String> {
+        guard !identifiers.isEmpty else { return [] }
+        var found: Set<String> = []
+        PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+            .enumerateObjects { asset, _, _ in found.insert(asset.localIdentifier) }
+        return found
+    }
+
     private static func materialise(_ result: PHFetchResult<PHAsset>) -> [PHAsset] {
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)

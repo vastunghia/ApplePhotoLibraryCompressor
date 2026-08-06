@@ -89,14 +89,33 @@ struct Apply: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // `alreadyApplied` is asked of the *whole* journal, not just this run's
-        // staging: that is the point of it outliving the staging directory. The
-        // pending queue is scoped, because only files still on disk can be
-        // imported.
-        let alreadyApplied = Ledger.appliedIdentifiers(in: read.entries)
-        let pending = Ledger.entries(read.entries, stagedUnder: area.root)
+        // Authorised here rather than after the dry-run gate, because the next
+        // few lines are a library question and a plan built without asking it
+        // would be a plan that lies.
+        try await PhotoLibraryAccess.authorize()
+
+        // The journal is asked about the *whole* history, not just this run's
+        // staging — that is the point of it outliving the staging directory. But
+        // what it records is what was done, not what is still true: delete a copy
+        // and the journal goes on claiming its JPEG is converted. So the library
+        // is asked which of those copies survive, and only those count.
+        //
+        // Without this the two answers to "already converted" disagree
+        // permanently: `select` infers it from the library and offers the photo
+        // again, and `apply` reads the journal and refuses it. The library wins,
+        // here as everywhere else.
+        let journalled = Ledger.appliedCopies(in: read.entries)
+        let surviving = PhotoLibraryAccess.existingIdentifiers(among: journalled.map(\.created))
+        let alreadyApplied = Set(
+            journalled.filter { surviving.contains($0.created) }.map(\.source)
+        )
+
+        // The pending queue is scoped to this staging root, because only files
+        // still on disk can be imported.
+        let staged = Ledger.entries(read.entries, stagedUnder: area.root)
             .filter { $0.outcome == .transcoded }
-            .filter { !alreadyApplied.contains($0.sourceLocalIdentifier) }
+        let pending = staged.filter { !alreadyApplied.contains($0.sourceLocalIdentifier) }
+        let alreadyHere = staged.count - pending.count
 
         guard !pending.isEmpty else {
             print("""
@@ -115,8 +134,16 @@ struct Apply: AsyncParsableCommand {
         let addedBytes = planned.reduce(0) { $0 + ($1.stagedBytes ?? 0) }
 
         print("\nPlan")
-        print(Format.table([
+        var planRows: [(String, String)] = [
             ("new HEIC assets to create", "\(planned.count)"),
+        ]
+        if alreadyHere > 0 {
+            // Said out loud rather than left as a gap between what was staged
+            // and what will be created. A count that only appears by subtraction
+            // is a count nobody checks.
+            planRows.append(("staged but already in your library", "\(alreadyHere)"))
+        }
+        print(Format.table(planRows + [
             ("added to the library now", Format.bytes(addedBytes)),
             ("recoverable once you delete the JPEGs", Format.bytes(savedBytes)),
             ("destination", destinationDescription),
@@ -130,8 +157,6 @@ struct Apply: AsyncParsableCommand {
             print("\nDry run — nothing was written. \(rerun)")
             return
         }
-
-        try await PhotoLibraryAccess.authorize()
 
         // Match staged entries back to live assets by local identifier. Chained
         // means `convert` has already selected for the whole run.

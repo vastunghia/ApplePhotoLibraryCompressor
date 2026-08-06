@@ -228,14 +228,37 @@ public final class Ledger {
         return entries.filter { ($0.stagedPath?.hasPrefix(prefix)) == true }
     }
 
-    /// Local identifiers already carried through to a created asset. `apply`
-    /// consults this so a re-run cannot duplicate work.
+    /// Local identifiers this journal says were carried through to a created
+    /// asset.
+    ///
+    /// What the journal *says*, which is not the same as what is true: the copy
+    /// it names may since have been deleted. Anything using this as a reason to
+    /// skip work must check the library first — see `appliedCopies`.
     public static func appliedIdentifiers(at url: URL) throws -> Set<String> {
         appliedIdentifiers(in: try readAll(at: url))
     }
 
     public static func appliedIdentifiers(in entries: [LedgerEntry]) -> Set<String> {
         Set(entries.filter { $0.outcome == .applied }.map(\.sourceLocalIdentifier))
+    }
+
+    /// Each conversion this journal recorded, as the JPEG it came from and the
+    /// asset it became.
+    ///
+    /// The pair is what makes the record checkable. The journal is permanent
+    /// now, so it long outlives the copies it describes — delete every HEIC and
+    /// it still claims those JPEGs are converted. That claim must never gate
+    /// work on its own: "already converted" is a property of the library, which
+    /// is exactly why the rest of this tool infers it rather than recording it.
+    /// The caller asks the library which of these `created` identifiers survive,
+    /// and believes only those.
+    public static func appliedCopies(in entries: [LedgerEntry]) -> [(source: String, created: String)] {
+        entries.compactMap { entry in
+            guard entry.outcome == .applied,
+                  let created = entry.createdAssetLocalIdentifier
+            else { return nil }
+            return (entry.sourceLocalIdentifier, created)
+        }
     }
 }
 

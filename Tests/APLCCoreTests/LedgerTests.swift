@@ -171,6 +171,32 @@ final class LedgerTests: XCTestCase {
             Ledger.entries(entries, stagedUnder: URL(fileURLWithPath: "/tmp/aplc-10")).count, 1)
     }
 
+    /// The journal records what was done, not what is still true. It names the
+    /// copy each conversion became precisely so the claim can be checked against
+    /// the library — delete every HEIC and the journal still says those JPEGs
+    /// are converted, which must not be allowed to gate anything on its own.
+    func testAppliedCopiesPairEachSourceWithWhatItBecame() {
+        let entries = [
+            LedgerEntry(outcome: .applied, sourceLocalIdentifier: "SRC/L0/001",
+                        originalFilename: "A.JPG", createdAssetLocalIdentifier: "NEW/L0/001"),
+            // No created identifier: nothing to check against, so it cannot be a
+            // reason to skip work either.
+            LedgerEntry(outcome: .applied, sourceLocalIdentifier: "SRC/L0/002",
+                        originalFilename: "B.JPG"),
+            LedgerEntry(outcome: .transcoded, sourceLocalIdentifier: "SRC/L0/003",
+                        originalFilename: "C.JPG", createdAssetLocalIdentifier: "NEW/L0/003"),
+        ]
+
+        let copies = Ledger.appliedCopies(in: entries)
+        XCTAssertEqual(copies.count, 1)
+        XCTAssertEqual(copies.first?.source, "SRC/L0/001")
+        XCTAssertEqual(copies.first?.created, "NEW/L0/001")
+
+        // The unvalidated view still reports both, which is why callers must not
+        // use it as a gate.
+        XCTAssertEqual(Ledger.appliedIdentifiers(in: entries), ["SRC/L0/001", "SRC/L0/002"])
+    }
+
     /// The point of the journal outliving staging: what has been imported is
     /// remembered even though the directory that staged it is long gone.
     func testAppliedIdentifiersSurviveAStagingRootThatNoLongerExists() throws {
