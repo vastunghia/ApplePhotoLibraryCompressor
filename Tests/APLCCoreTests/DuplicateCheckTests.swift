@@ -30,8 +30,8 @@ final class DuplicateCheckTests: XCTestCase {
     /// which is exactly what `TwinKey` is supposed to ignore — otherwise the
     /// check would never fire at all.
     func testAStagedJPEGNameMatchesTheHEICCopyItProduced() {
-        let staged = TwinKey(filename: "5D3_7177.jpg", creationDate: noon)
-        let inLibrary = TwinKey(filename: "5D3_7177.heic", creationDate: noon)
+        let staged = TwinKey(filename: "DSC_1234.jpg", creationDate: noon)
+        let inLibrary = TwinKey(filename: "DSC_1234.heic", creationDate: noon)
         XCTAssertEqual(staged, inLibrary)
     }
 

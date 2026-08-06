@@ -31,6 +31,15 @@ public enum WorkspaceLayout {
     /// The album `apply` puts the new HEICs in.
     public static let copiesAlbum = "Compressed Copies"
 
+    /// The JPEGs whose copy `apply` created — the ones the user may now delete.
+    ///
+    /// Only ever filled by `apply`, and only for a copy it created itself in a
+    /// run it watched. A photo skipped because a copy already existed does *not*
+    /// go in, even though its copy is right there: this album is an invitation to
+    /// delete, so the standard for entering it is having made and verified the
+    /// replacement, not having found one.
+    public static let convertedOriginalsAlbum = "Compressed Originals"
+
     /// "2026-02". Zero-padded so the folders sort chronologically in Photos,
     /// which orders them as text.
     public static func monthFolder(_ key: MonthKey) -> String {

@@ -15,8 +15,10 @@ struct Apply: AsyncParsableCommand {
 
             Each copy is filed by the capture date of its original, in
             "aplc workspace" > "YYYY-MM" > "Compressed Copies", so an album that
-            spans two months produces two destinations. --dest-album overrides
-            that with a single flat album.
+            spans two months produces two destinations. The JPEGs it replaced go
+            beside them in "Compressed Originals" — the album to delete from once
+            you are satisfied. --dest-album overrides all of that with a single
+            flat album.
 
             Runs as a dry run unless you pass --confirm. It refuses to start if
             `verify` reports any problem, and it skips assets already applied, so
@@ -161,6 +163,8 @@ struct Apply: AsyncParsableCommand {
         var importRest = false
         var stopped = false
         var perDestination: [String: Int] = [:]
+        /// Month folder -> the JPEGs whose copy this run created.
+        var convertedOriginals: [String: [PHAsset]] = [:]
         // Without a terminal there is nobody to answer, so a question would be a
         // hang. `convert` inherits this: run it from a script and a differing
         // copy is skipped and reported, not waited on.
@@ -284,6 +288,10 @@ struct Apply: AsyncParsableCommand {
                 )
                 created += 1
                 perDestination[destAlbum ?? folder, default: 0] += 1
+                // Gathered, not filed yet: one `add` per month at the end beats
+                // one per photo, and only a copy that actually got created earns
+                // its original a place in the deletable album.
+                convertedOriginals[folder, default: []].append(sourceAsset)
                 if let text = entry.sourceTextMetadata, !text.isEmpty {
                     pendingText[identifier] = text
                     createdFilenames[identifier] = entry.originalFilename
@@ -315,6 +323,23 @@ struct Apply: AsyncParsableCommand {
             }
         }
 
+        // The JPEGs that now have a replacement, gathered where the user can
+        // select them all and delete them in one gesture. Skipped in --dest-album
+        // mode: that flag says "keep out of the workspace", and this album has
+        // nowhere else to live.
+        var markedForDeletion = 0
+        if destAlbum == nil {
+            for (folder, originals) in convertedOriginals.sorted(by: { $0.key < $1.key }) {
+                let album = try await Importer.ensureWorkspaceAlbum(
+                    WorkspaceLayout.convertedOriginalsAlbum, inFolderNamed: folder
+                )
+                let existing = PhotoLibraryAccess.identifiers(in: album)
+                let toAdd = originals.filter { !existing.contains($0.localIdentifier) }
+                try await Importer.add(toAdd, to: album)
+                markedForDeletion += toAdd.count
+            }
+        }
+
         let textReport = await transferTextMetadata(pendingText, ledger: ledger,
                                                     filenames: createdFilenames)
 
@@ -326,6 +351,9 @@ struct Apply: AsyncParsableCommand {
         ]
         for (name, count) in perDestination.sorted(by: { $0.key < $1.key }) {
             rows.append((destAlbum == nil ? "into \(name)" : "into \"\(name)\"", "\(count)"))
+        }
+        if destAlbum == nil {
+            rows.append(("originals now replaceable", "\(markedForDeletion)"))
         }
         rows.append(("keywords/title/caption transferred", textReport.summary))
         print(Format.table(rows))
@@ -370,10 +398,22 @@ struct Apply: AsyncParsableCommand {
             shared original removes it for the other participants too, while your
             converted copy stays personal.
 
-            Review \(reviewTarget) in Photos.app. Deleting the JPEG
-            originals — if you decide to — is a manual step, and they will sit in
-            Recently Deleted for 30 days first.
+            Review \(reviewTarget) in Photos.app.
             """)
+
+        if destAlbum == nil && markedForDeletion > 0 {
+            print("""
+
+                The \(markedForDeletion) JPEG(s) this run replaced are gathered in \
+                "\(WorkspaceLayout.convertedOriginalsAlbum)", next to their copies. \
+                Deleting them is your step, and it is the one that finally reclaims \
+                the space — they will sit in Recently Deleted for 30 days first.
+
+                Inside an album, use Cmd+Backspace. Plain Backspace only takes a photo \
+                out of the album: the file stays, nothing reaches Recently Deleted, and \
+                nothing tells you it did not happen.
+                """)
+        }
     }
 
     // MARK: - Duplicates

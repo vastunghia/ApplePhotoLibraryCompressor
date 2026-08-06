@@ -56,6 +56,9 @@ copies and leaves deletion to you, in Photos.app.
   photos into an album, which touches no photo and loses nothing. It is still a
   one-way door, because taking a photo back out of an album needs a call this
   tool does not contain; a wrong month is undone by hand in Photos.app.
+- **It gathers what you may delete; it never deletes it.** `apply` collects each
+  replaced JPEG into `Compressed Originals` so the last step is one gesture, but
+  that step stays yours and stays in Photos.app.
 - **The albums and folders are one-way too.** `select` and `apply` create the
   workspace folders as they need them, and nothing here can unmake one:
   `deleteCollectionLists` and `removeChildCollections` are on the same forbidden
@@ -220,7 +223,8 @@ Two steps stay manual, in Photos.app, in this order:
 1. If the originals were in the **iCloud Shared Photo Library**, select the new
    copies and move them there — they are created in your personal library. See
    [What still cannot be carried over](#what-still-cannot-be-carried-over).
-2. Only then delete the JPEG originals, if you decide to.
+2. Only then delete the JPEG originals, if you decide to. They are gathered for
+   you in `Compressed Originals`, next to their copies.
 
 Doing them the other way round removes the originals for everyone they were shared
 with while leaving your copies personal.
@@ -255,8 +259,16 @@ converted copy of.
 It can find them because `apply` gives every new HEIC its original's **filename
 stem** and its **exact creation date**. A converted JPEG therefore always has a
 matching HEIC sitting in the same month, and a single month's fetch sees both
-halves of the pair. Photos that were always HEIC pair with nothing, so they do not
-make their JPEG neighbours look converted.
+halves of the pair. A camera-native HEIC pairs with nothing, so a library full of
+them does not make their JPEG neighbours look converted.
+
+The rule is not infallible, and it is worth knowing which way it fails. A camera
+that saved the *same* shot as both a JPEG and a HEIC produces a genuine pair —
+same stem, same second — that this cannot tell from a conversion. Measured on one
+real library: of seven pairs, one was such a photo from 2021, years before the
+tool existed. The cost is that this JPEG is never offered for conversion: a
+saving not taken, not a photo at risk. Every uncertainty here is resolved the same
+way, towards doing less rather than assuming more.
 
 Both facts matter for what the answer survives. It does not depend on the staging
 folder, which you may delete; nor on the copies staying in the album `apply` put
@@ -300,9 +312,11 @@ Both albums live in a folder tree that the tool builds as it goes:
 aplc workspace
 ├── 2019-06
 │   ├── Compressed Copies      the HEICs apply created
+│   ├── Compressed Originals   the JPEGs they replaced — delete from here
 │   └── Selected Originals     the JPEGs select found
 └── 2019-07
     ├── Compressed Copies
+    ├── Compressed Originals
     └── Selected Originals
 ```
 
@@ -319,6 +333,19 @@ by.
 
 Nothing is created before there is something to put in it: a month with nothing
 left to convert leaves no empty folder behind.
+
+**`Compressed Originals` is the point of the whole arrangement.** Converting only
+adds; the space comes back when you delete the JPEGs, and that step is yours. So
+`apply` gathers each original whose copy it just created into one album, next to
+the copies, ready to select and delete in a single gesture.
+
+What earns a photo a place there is deliberately narrow: **this tool made the
+replacement, in a run it watched, and checked it afterwards.** A JPEG skipped
+because a copy already existed does *not* go in, even though its copy is sitting
+right there — the album invites deletion, so finding a replacement is not the
+same standard as having made one. Photos converted before you started using this
+tool will never appear in it either. Use `select`'s "JPEGs already converted"
+count for those; it answers the wider question.
 
 ### Duplicates are refused at the door
 
