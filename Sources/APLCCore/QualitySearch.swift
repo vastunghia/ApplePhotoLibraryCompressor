@@ -66,11 +66,18 @@ public struct QualitySearchOutcome: Sendable {
 /// it fails; here SSIM is the objective and quality is merely the means, so the
 /// result is the smallest file that satisfies the caller's fidelity bar.
 ///
-/// It assumes SSIM rises with quality, which is what makes bisection valid.
-/// That assumption is not load-bearing for safety: the rung finally returned has
-/// always been measured against the target itself, so a non-monotonic patch can
-/// only cost a rung of saving — never yield an encode below the bar.
-public struct QualitySearch {
+/// This type is the loop that encodes and measures; `RungSearch` decides where
+/// to look next, and holds the reasoning about why.
+///
+/// It assumes SSIM rises with quality, which is what lets a search over the
+/// ladder mean anything at all. That assumption is not load-bearing for safety:
+/// the rung finally returned has always been measured against the target itself,
+/// so a non-monotonic patch can only cost a rung of saving — never yield an
+/// encode below the bar.
+///
+/// `Sendable` because every photo in a `transcode` run shares one of these:
+/// it is two immutable values and holds nothing that a search mutates.
+public struct QualitySearch: Sendable {
     public let ladder: [Double]
     public let targetSSIM: Double
 
@@ -81,11 +88,11 @@ public struct QualitySearch {
     }
 
     /// - Parameters:
-    ///   - seedIndex: where to start, typically the rung chosen for earlier
-    ///     assets in the same album. Photographs from one album resemble each
-    ///     other, so a good seed usually turns the search into a two-probe
-    ///     confirmation. It is only a starting point: a wrong seed costs a probe
-    ///     or two, never a wrong answer.
+    ///   - seedIndex: where to spend the first encode, typically the rung chosen
+    ///     for earlier assets in the same album. Only a starting point: the
+    ///     search reads the SSIM it gets back and corrects for a poor one
+    ///     immediately, so a wrong seed costs at most a probe and never an
+    ///     answer. Omitting it starts in the middle of the ladder.
     ///   - keywords: passed straight to `Transcoder`; see its documentation for
     ///     why `nil` and `[]` mean different things.
     ///
@@ -102,26 +109,42 @@ public struct QualitySearch {
             .appendingPathComponent(".\(destination.lastPathComponent).probe")
         defer { try? FileManager.default.removeItem(at: probeURL) }
 
-        var low = 0
-        var high = ladder.count - 1
+        // Without a seed, start in the middle. With nothing known about the
+        // photograph that is the rung furthest from being badly wrong, and it is
+        // where the bisecting version used to begin too.
+        var search = RungSearch(
+            ladderCount: ladder.count,
+            target: targetSSIM,
+            seed: seedIndex ?? ((ladder.count - 1) / 2)
+        )
         var accepted: QualitySearchOutcome.Accepted?
-        var bestSSIM = 0.0
-        var probes = 0
 
-        /// Encodes at one rung and reports whether it met the target, keeping
-        /// the file when it did. Walking downwards means a later acceptance is
-        /// always the cheaper one, so it simply replaces the previous.
-        func probe(_ index: Int) throws -> Bool {
+        // `RungSearch` chooses where to look; this loop does the looking. The
+        // split is what lets the choosing be tested against measured curves
+        // instead of against the encoder.
+        loop: while true {
+            let index: Int
+            switch search.next() {
+            case .finished:
+                break loop
+            case .probe(let next):
+                index = next
+            }
+
             let result = try Transcoder(quality: ladder[index])
                 .transcode(source: source, destination: probeURL, keywords: keywords)
             let score = try QualityMetrics.compare(source, probeURL)
-            probes += 1
-            bestSSIM = max(bestSSIM, score.ssim)
 
-            guard score.ssim >= targetSSIM else {
+            // The probes no longer arrive in descending order, so "this one
+            // passed" is not the same as "this one is the cheapest that passed".
+            // Keeping the wrong file here would put an image in the library whose
+            // SSIM is not the one recorded beside it — `record` answers the
+            // question so only one place has to get it right.
+            guard search.record(rung: index, ssim: score.ssim) else {
                 try? FileManager.default.removeItem(at: probeURL)
-                return false
+                continue
             }
+
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)
             }
@@ -137,59 +160,15 @@ public struct QualitySearch {
                 score: score,
                 rungIndex: index
             )
-            return true
-        }
-
-        // With a seed, widen outwards from it — one rung, then two, four, eight —
-        // until the answer is bracketed, and only bisect what is left. Bisecting
-        // the whole range instead would throw the seed away: knowing the answer
-        // is *near* index 10 is worth nothing to a search that starts at the
-        // midpoint regardless. Neighbouring photographs usually agree within a
-        // rung or two, which this resolves in two or three encodes.
-        if let seedIndex {
-            let seed = min(max(seedIndex, low), high)
-            if try probe(seed) {
-                high = seed - 1
-                var step = 1
-                while high >= low {
-                    let index = max(low, seed - step)
-                    if try probe(index) {
-                        high = index - 1
-                        if index == low { break }
-                        step *= 2
-                    } else {
-                        low = index + 1
-                        break
-                    }
-                }
-            } else {
-                low = seed + 1
-                var step = 1
-                while low <= high {
-                    let index = min(high, seed + step)
-                    if try probe(index) {
-                        high = index - 1
-                        break
-                    }
-                    low = index + 1
-                    if index == high { break }
-                    step *= 2
-                }
-            }
-        }
-
-        while low <= high {
-            let index = (low + high) / 2
-            if try probe(index) {
-                high = index - 1
-            } else {
-                low = index + 1
-            }
         }
 
         if accepted == nil {
             try? FileManager.default.removeItem(at: destination)
         }
-        return QualitySearchOutcome(accepted: accepted, bestSSIM: bestSSIM, probes: probes)
+        return QualitySearchOutcome(
+            accepted: accepted,
+            bestSSIM: search.bestSSIM,
+            probes: search.probeCount
+        )
     }
 }

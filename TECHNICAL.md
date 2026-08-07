@@ -162,8 +162,37 @@ encoding one image at every hundredth from 0.40 to 1.00 and hashing the results,
 61 values collapse to **26 distinct files** — and two images of different size,
 aspect and content produced identical boundaries, so the quantisation belongs to
 the encoder, not to the picture. `aplc` therefore searches a ladder of 20 real
-rungs rather than a continuum, bisecting it and starting from the rung the
-previous photos needed. Typically **two to three encodes per photo**.
+rungs rather than a continuum.
+
+### The search interpolates rather than bisecting
+
+Every probe measures an SSIM, and bisection would reduce that number to a single
+bit — did it clear the target? — and throw the rest away. That is wasteful,
+because the value says *how far* off the rung was, not merely which side of the
+line it fell on.
+
+Measured on eight photographs across the whole ladder: every curve was monotone,
+and in `log(1 − SSIM)` — distortion, which decays roughly exponentially — each
+was nearly a straight line, r² between 0.90 and 0.999. So one probe supports an
+extrapolation to where the curve crosses the target, and two support a secant
+that corrects it with the photograph's own slope.
+
+The result on a real month: **2.9 encodes per photo against 3.9**, reaching
+exactly the same qualities and the same SSIMs. Two things about it are worth
+stating plainly:
+
+- **It is interpolation, not prediction.** Nothing is learned, nothing is stored
+  between photos, and there is no model of your library. The one global constant
+  — the average slope — is used only for the first jump, and only ever decides
+  *where to look*, never what to accept.
+- **A statistical predictor was tried and rejected.** The obvious one is the
+  source JPEG's bytes per pixel, since an already-compressed file is smoother and
+  cheaper to re-encode. Across 93 real conversions that correlates at r = 0.42:
+  at 0.15 bytes per pixel the right rung ranged from 0 to 7. Not usable.
+
+The guarantee is unchanged, and it is a measurement rather than an estimate: the
+search stops only once it has measured a rung that passes *and* the rung below it
+failing, so the answer is the same one an exhaustive scan would give.
 
 Consequences:
 
@@ -178,6 +207,148 @@ Passing `--quality` explicitly still works and is the way to reproduce an old
 run. Either way, use `calibrate` and **look at the files**: a target that reads
 well as a number can still be visibly wrong on your own photographs, and SSIM
 does not know what the picture is of.
+
+## Several photos at once
+
+The two halves of a probe use the machine in opposite ways, and that asymmetry
+is the whole reason `transcode` converts more than one photo at a time.
+
+Measured on 20–22 MP JPEGs on a six-core machine, timing each phase against the
+process's own CPU time to see how many cores it really occupied:
+
+| phase | wall | cores used |
+|---|---|---|
+| encode to HEIC (ImageIO) | 1.2–1.5 s | **4.4–4.8** |
+| measure fidelity (decode + SSIM) | 1.8–2.3 s | **1.00** |
+
+The fidelity check is 60% of every probe and it is one core for all of it, because
+the SSIM is ordinary scalar code. A sequential run therefore alternates between a
+phase that fills the machine and a phase that leaves five sixths of it idle.
+
+### The SSIM itself, and what exactness costs
+
+The mean SSIM is a separable box blur over five planes, and the blur used to
+finish one column before starting the next — reading every value `width` floats
+from the last, so each read was its own cache line and nothing vectorised.
+Sliding a whole row of accumulators down the image instead is **2.6× on that
+pass**, and computing the three product planes through `vDSP` rather than one
+interleaved loop is **5.3× on that part**. Together, **1.37× on the whole
+metric**.
+
+Both rewrites are *exact*, not approximate: the SSIM they produce is identical to
+the last digit, verified on real photographs and pinned by a test that
+reconstructs the old column-at-a-time pass and demands equality. That mattered
+more than the speed. A `Float` accumulator would have been about twice as fast
+again, but the sliding sums run across thousands of elements and in single
+precision the rounding drifts into the 1e-5 range — which would break the
+guarantee that computing the SSIM in strips gives the same answer as computing it
+whole. The striping is meant to be an exact decomposition, not an approximation,
+so that trade was refused.
+
+Two dead ends, recorded so nobody pays for them twice: `vDSP_conv` is the wrong
+tool for a box blur and measured **34% slower** than the scalar sliding sum,
+which is already O(1) per pixel whatever the radius; and folding the two updates
+into `sum += entering - leaving` breaks the bit-identity, because floating-point
+addition is not associative.
+
+**A 1.37× metric is not a 1.37× run**, and the gap is the interesting part. The
+same twelve photos, the two versions measured back to back:
+
+| | before | after | |
+|---|---|---|---|
+| `--jobs 1` | 112.6 s | 101.4 s | 1.11× |
+| `--jobs 3` | 77.1 s | 74.5 s | **1.03×** |
+
+Run one photo at a time and the fidelity check is on the critical path, so making
+it faster shows. Run three at once and it is already hidden behind the encoder,
+which cannot be shared — so the same improvement is worth almost nothing. The two
+optimisations overlap: whichever is done second gets the smaller half.
+
+What that leaves is a single bottleneck to aim at. The encoder is serial and
+every probe pays for one, so the remaining lever is **doing fewer encodes**, not
+doing any of the work faster.
+
+### The encoder does not parallelise, and cannot be made to
+
+The obvious inference — run several encodes at once — is wrong, and it was worth
+measuring before designing around it. Six encodes of the same image:
+
+| | total | per encode |
+|---|---|---|
+| one after another | 7.98 s | 1.33 s |
+| six at once, on six threads | 7.76 s | 1.29 s |
+
+**No gain at all.** ImageIO's HEIC encode goes through VideoToolbox's tile
+compression, which behaves as a single process-wide resource: concurrent callers
+serialise inside it. Since one encode already spreads itself over most of the
+cores, there is nothing left to win.
+
+What does parallelise is the other 60%. Six fidelity checks at once took 4.12 s
+against roughly 11 s one at a time. So the whole gain comes from measuring one
+photo while another is encoding, and the encoder sets the floor.
+
+Measured on a real month — the same twelve photos each time, on six cores:
+
+| `--jobs` | wall | encodes per photo | |
+|---|---|---|---|
+| 1 | 113.0 s | 3.2 | |
+| 3 | 76.7 s | 3.9 | **1.47×** |
+| 6 | 88.1 s | 4.4 | 1.28× |
+
+**More workers was not better, and the third column is why.** Each search starts
+from the rung earlier photos needed; the more photos start at once, the more of
+them start before anything has finished, and so start cold. At `--jobs 6` that
+was 4.4 encodes per photo against 3.2 — nearly 40% more encoding — and encoding
+is exactly the part that cannot be done in parallel.
+
+That penalty no longer exists: the interpolating search barely depends on the
+seed, and now costs 2.8, 2.9 and 2.9 encodes per photo at one, three and six
+workers. Re-measured, the three settings finish within about 3% of each other,
+which is noise. So `--jobs` is a flat curve now rather than a peak, and the
+default of half the cores is kept because it reaches the flat part while leaving
+the machine usable for anything else.
+
+The general lesson survives the specific numbers: **a second worker helps only
+while there is idle time to fill, and past that point extra workers can only add
+work to the serial encoder.** Measure "encodes per photo" from the summary rather
+than wall time — it is exact, and immune to whatever else the machine is doing.
+
+### Blocking work does not go on the cooperative pool
+
+A conversion may not run on a Swift concurrency task group's own threads. The
+encode blocks inside `VTTileCompressionSessionEncodeTile` waiting on a semaphore,
+and Swift's cooperative pool holds exactly one thread per core and will not grow
+to replace a blocked one — so six concurrent encodes in a task group fill the
+pool with blocked threads and **never return**. Measured; the run hangs, it does
+not fail.
+
+Two details of that finding were surprises, and both are load-bearing:
+
+- Putting the encoder behind a lock does **not** fix it. The threads waiting for
+  the lock are cooperative threads too, so the pool is just as full.
+- The identical work on an ordinary GCD queue is fine, because that pool
+  overcommits and replaces a blocked thread.
+
+So the blocking half runs on a GCD queue and the cooperative threads only ever
+await it. That is what `BlockingWork` is for, and anything added later that calls
+ImageIO or VideoToolbox from more than one photo at a time has to go through it.
+
+### What the parallelism does not change
+
+- **The workers only compute.** Every library read happens first, in album order,
+  so nothing running in parallel touches PhotoKit. Every journal write, printed
+  line and running total belongs to the one task that collects results — which is
+  why there is not a lock anywhere in it.
+- **Results are reordered back into album order** before they are reported or
+  journalled, so two runs of the same month stay comparable line by line and the
+  journal reads as it always did. The cost is that one slow photo holds back the
+  lines of the photos behind it.
+- **The seed becomes timing-dependent.** Each search starts from the rung earlier
+  photos needed, and which photos have finished depends on the machine. So the
+  number of encodes per photo varies between runs, and in the rare non-monotonic
+  case the chosen rung can differ by one. The guarantee does not move: the rung
+  finally returned has always been measured against the target itself, so a
+  different seed can cost a rung of saving and never fidelity.
 
 ## A year is a loop, not a wider net
 

@@ -252,6 +252,7 @@ Options worth knowing:
 | `--year Y` without `--month` | Work through all twelve months of that year, one at a time. |
 | `--album "Name"` | Work on an album you made by hand instead of a month. The only form that writes nothing at all. |
 | `--limit N` | Stop after N photos. `convert --year Y` applies it to each month. |
+| `--jobs N` | How many photos to convert at once. Defaults to half your CPU cores; raising it is worth very little, because the encoder cannot run twice at the same time. |
 | `--dry-run` | Do everything except write to the library. |
 | `--min-ssim` | The fidelity target every conversion must reach. Default 0.97. |
 | `--quality` | Fix the encoder quality instead of searching per photo. See [TECHNICAL.md](TECHNICAL.md#quality-is-chosen-per-photo). |
@@ -280,9 +281,13 @@ offer that photo again, which is the right answer.
 
 ## Known limitations
 
-- **Sequential.** No parallelism across photos yet, and measuring fidelity costs
-  1–2 s per encode. Passing `--quality` explicitly skips the search when time
-  matters more than bytes.
+- **Conversion is slow, and the ceiling is the encoder.** It uses most of your
+  cores for one photo but cannot be run twice at the same time, so converting
+  photos in parallel is worth about 1.5× and raising `--jobs` past the default
+  adds very little. The remaining cost is the number of encodes each photo needs
+  — about three, to find its quality — and `--quality` skips that search
+  entirely when time matters more than bytes. See
+  [TECHNICAL.md](TECHNICAL.md#several-photos-at-once) for the measurements.
 - **`verify` re-checks structure and hashes**, and does not re-export originals to
   recompute fidelity from scratch.
 - **Photos only.** In a library that holds much video, transcoding H.264 to HEVC
