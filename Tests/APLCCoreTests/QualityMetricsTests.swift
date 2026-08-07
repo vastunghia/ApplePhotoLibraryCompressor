@@ -103,4 +103,57 @@ final class QualityMetricsTests: XCTestCase {
 
         XCTAssertEqual(striped, single, accuracy: 1e-9)
     }
+
+    /// The vertical pass slides a whole row of running sums down the image
+    /// instead of finishing one column at a time, which is 2.6x faster because
+    /// it stops reading memory `width` floats at a stride. The rewrite is only
+    /// safe because it is **exact**: each column's sum is still formed by the
+    /// same additions in the same order, merely interleaved with its neighbours'.
+    ///
+    /// So this compares against the shape the code used to have, and demands
+    /// equality rather than closeness. Floating point is not associative — fold
+    /// the two updates into `sum += entering - leaving` and this fails, which is
+    /// the mistake it exists to catch.
+    func testVerticalPassIsBitIdenticalToFinishingOneColumnAtATime() {
+        let w = 97, h = 61, r = 5
+        var plane = [Float](repeating: 0, count: w * h)
+        var seed: UInt64 = 987654321
+        for i in 0..<(w * h) {
+            seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
+            plane[i] = Float(seed % 100_000) / 100_000.0
+        }
+
+        // What `boxBlur` produces now.
+        var mine = plane
+        var scratch = [Float](repeating: 0, count: w * h)
+        QualityMetrics.boxBlur(&mine, &scratch, width: w, height: h, radius: r)
+
+        // The same horizontal pass, then the original column-at-a-time vertical.
+        var reference = plane
+        var referenceScratch = [Float](repeating: 0, count: w * h)
+        let n = Float(2 * r + 1)
+        for row in 0..<h {
+            let o = row * w
+            var sum = 0.0
+            for k in -r...r { sum += Double(reference[o + min(max(k, 0), w - 1)]) }
+            referenceScratch[o] = Float(sum) / n
+            for col in 1..<w {
+                sum += Double(reference[o + min(col + r, w - 1)])
+                sum -= Double(reference[o + max(col - r - 1, 0)])
+                referenceScratch[o + col] = Float(sum) / n
+            }
+        }
+        for col in 0..<w {
+            var sum = 0.0
+            for k in -r...r { sum += Double(referenceScratch[min(max(k, 0), h - 1) * w + col]) }
+            reference[col] = Float(sum) / n
+            for row in 1..<h {
+                sum += Double(referenceScratch[min(row + r, h - 1) * w + col])
+                sum -= Double(referenceScratch[max(row - r - 1, 0) * w + col])
+                reference[row * w + col] = Float(sum) / n
+            }
+        }
+
+        XCTAssertEqual(mine, reference, "the fast vertical pass changed the answer")
+    }
 }
