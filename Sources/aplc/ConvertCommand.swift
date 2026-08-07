@@ -16,6 +16,14 @@ struct Convert: AsyncParsableCommand {
             Originals" up to date, so a month you have never selected needs no
             preparatory command.
 
+            Given --year alone it does all of that for each of the twelve months
+            in turn, with its own staging each time, so the peak on disk is one
+            month's worth however long the run is. A month that fails does not
+            stop the others: it is reported in the summary at the end, and the
+            command exits non-zero. Interrupting is safe, and re-running picks up
+            where it left off — what is already converted is a question the
+            library answers, not the run.
+
             It still cannot destroy. The JPEG originals are untouched, nothing is
             deleted, and the copies land in --dest-album where you can delete them
             by hand if you change your mind. Removing the originals afterwards is
@@ -52,7 +60,7 @@ struct Convert: AsyncParsableCommand {
             help: "Ceiling on data pulled from iCloud, in GB. 0 refuses downloads entirely.")
     var maxDownloadGB: Double = 5.0
 
-    @Option(help: "Stop after this many assets, in both transcode and apply.")
+    @Option(help: "Stop after this many assets per month, in both transcode and apply.")
     var limit: Int?
 
     @Flag(name: .customLong("dry-run"),
@@ -65,11 +73,95 @@ struct Convert: AsyncParsableCommand {
 
     func validate() throws { try source.requireSelection() }
 
+    /// How one month of a run ended.
+    ///
+    /// A year is twelve independent conversions, so a month that fails is a
+    /// result to record and report, not a reason to throw away the eleven
+    /// others. With a single month there is nothing to go on to, and `.failed`
+    /// becomes the same non-zero exit it always was.
+    private enum MonthOutcome {
+        case nothingToConvert
+        case nothingConvertible
+        case gateRejectedAll
+        case done
+        case failed(String)
+
+        var summary: String {
+            switch self {
+            case .nothingToConvert: return "nothing left to convert"
+            case .nothingConvertible: return "nothing convertible"
+            case .gateRejectedAll: return "every photo rejected by the gate"
+            case .done: return "done"
+            case .failed(let why): return "failed — \(why)"
+            }
+        }
+
+        var isFailure: Bool {
+            if case .failed = self { return true }
+            return false
+        }
+    }
+
     func run() async throws {
+        // One scope unless a bare --year was given, in which case twelve, run in
+        // order. Each is a self-contained conversion with its own staging: the
+        // journal is scoped by staging root, so sharing one across months would
+        // have December re-verifying January.
+        let scopes = source.scopes
+        let wholeYear = scopes.count > 1
+        var results: [(label: String, outcome: MonthOutcome)] = []
+
+        for (index, scope) in scopes.enumerated() {
+            let label = Self.label(for: scope)
+            if wholeYear {
+                print("\n=== \(label) — \(index + 1) of \(scopes.count) ===")
+            }
+
+            let outcome: MonthOutcome
+            do {
+                outcome = try await convertOne(scope: scope)
+            } catch {
+                // With one month there is nothing to carry on to, so the error
+                // keeps its own exit code and its own message.
+                guard wholeYear else { throw error }
+                outcome = .failed("\(error)")
+            }
+            results.append((label, outcome))
+
+            if wholeYear, outcome.isFailure {
+                print("\n\(label) \(outcome.summary). Going on to the next month.")
+            }
+        }
+
+        if wholeYear {
+            print("\nThe year, month by month")
+            print(Format.table(results.map { ($0.label, $0.outcome.summary) }))
+        }
+
+        // Non-zero when any month failed, so a year run can still be trusted in
+        // a script even though it does not stop at the first problem.
+        if results.contains(where: { $0.outcome.isFailure }) { throw ExitCode.failure }
+    }
+
+    /// "March 2019", or the album's own name.
+    private static func label(for scope: SourceAlbumOptions) -> String {
+        guard let key = scope.monthKey else { return scope.displayName }
+        return MonthBounds.label(year: key.year, month: key.month)
+    }
+
+    /// The whole pipeline over one month, or one named album.
+    private func convertOne(scope: SourceAlbumOptions) async throws -> MonthOutcome {
         // This run owns the staging directory, and the delegated commands are
         // handed it by path. To them it is pinned, so only this command's
         // `cleanUp` can remove it — and it always does, success or failure.
-        let area = try staging.makeArea()
+        // A month of a year gets its own, so the peak on disk is one month's
+        // worth however long the run is.
+        let area: StagingArea
+        if source.isWholeYear, let key = scope.monthKey {
+            area = try staging.makeArea(named: WorkspaceLayout.monthFolder(key))
+        } else {
+            area = try staging.makeArea()
+        }
         defer { area.cleanUp() }
         let ledgerURL = try ledgerOptions.url()
 
@@ -78,31 +170,35 @@ struct Convert: AsyncParsableCommand {
         // turns that into a failure in the first second rather than after an
         // hour of transcoding. It cannot produce a wrong conversion — only a
         // refusal to start.
-        let transcode = try Transcode.parse(transcodeArguments(area: area))
-        let apply = try Apply.parse(applyArguments(area: area))
+        let transcode = try Transcode.parse(transcodeArguments(scope: scope, area: area))
+        let apply = try Apply.parse(applyArguments(scope: scope, area: area))
 
-        if let key = source.monthKey, source.shouldRefreshSelection {
-            print("[1/5] Selecting what \(source.displayName) still has to convert")
+        // "Stopping" is the truth for one month, and a lie inside a year: there
+        // the run goes straight on to the next one.
+        let stopping = source.isWholeYear ? "" : " Stopping."
+
+        if let key = scope.monthKey, scope.shouldRefreshSelection {
+            print("[1/5] Selecting what \(scope.displayName) still has to convert")
             let outcome = try await Select.fill(year: key.year, month: key.month, into: nil)
             guard outcome.destination != nil else {
-                print("\n\(source.nothingLeftMessage) Stopping.")
-                return
+                print("\n\(scope.nothingLeftMessage)\(stopping)")
+                return .nothingToConvert
             }
             print("  \(outcome.added) added, \(outcome.alreadyInAlbum) already there.")
         } else {
-            print("[1/5] Working on \(source.displayName) as it stands")
+            print("[1/5] Working on \(scope.displayName) as it stands")
         }
 
-        print("\n[2/5] Scanning \(source.displayName)")
+        print("\n[2/5] Scanning \(scope.displayName)")
         // Already selected just above, so the census must not do it again.
-        guard let census = try await Scan.census(source: source, refreshingSelection: false) else {
-            print("\n\(source.nothingLeftMessage) Stopping.")
-            return
+        guard let census = try await Scan.census(source: scope, refreshingSelection: false) else {
+            print("\n\(scope.nothingLeftMessage)\(stopping)")
+            return .nothingToConvert
         }
-        Scan.report(census, album: source.displayName)
+        Scan.report(census, album: scope.displayName)
         guard census.eligible > 0 else {
-            print("\nNothing in \(source.displayName) can be converted. Stopping.")
-            return
+            print("\nNothing in \(scope.displayName) can be converted.\(stopping)")
+            return .nothingConvertible
         }
 
         print("\n[3/5] Transcoding \(census.eligible) convertible photo(s)")
@@ -123,34 +219,35 @@ struct Convert: AsyncParsableCommand {
                 print("  \(problem.file): \(problem.detail)")
             }
             print("\nStopping: nothing will be written to your library.")
-            throw ExitCode.failure
+            return .failed("`verify` found \(report.problems.count) problem(s)")
         }
         guard report.checked > 0 else {
-            print("\nNothing was staged — every photo was rejected by the gate. Stopping.")
-            return
+            print("\nNothing was staged — every photo was rejected by the gate.\(stopping)")
+            return .gateRejectedAll
         }
 
         let where_ = destAlbum.map { "\"\($0)\"" } ?? "the workspace"
         print("\n[5/5] \(dryRun ? "Planning the import" : "Adding copies to \(where_)")")
         try await apply.run()
+        return .done
     }
 
-    func transcodeArguments(area: StagingArea) -> [String] {
+    func transcodeArguments(scope: SourceAlbumOptions, area: StagingArea) -> [String] {
         var arguments = area.forwardedArguments + ledgerOptions.forwardedArguments + [
             "--max-download-gb", "\(maxDownloadGB)",
             "--chained",
         ]
-        arguments += source.forwardedArguments
+        arguments += scope.forwardedArguments
         arguments += gateArguments()
         if let limit { arguments += ["--limit", "\(limit)"] }
         return arguments
     }
 
-    func applyArguments(area: StagingArea) -> [String] {
+    func applyArguments(scope: SourceAlbumOptions, area: StagingArea) -> [String] {
         var arguments = area.forwardedArguments + ledgerOptions.forwardedArguments + [
             "--chained",
         ]
-        arguments += source.forwardedArguments
+        arguments += scope.forwardedArguments
         if let destAlbum { arguments += ["--dest-album", destAlbum] }
         if importViaAppleScript { arguments.append("--import-via-applescript") }
         arguments += gateArguments()

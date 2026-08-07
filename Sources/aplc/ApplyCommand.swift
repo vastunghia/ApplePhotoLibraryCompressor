@@ -20,6 +20,10 @@ struct Apply: AsyncParsableCommand {
             you are satisfied. --dest-album overrides all of that with a single
             flat album.
 
+            Given --year without --month it matches staged files against all
+            twelve months' albums, which is what makes it the step `convert` can
+            hand a year to.
+
             Runs as a dry run unless you pass --confirm. It refuses to start if
             `verify` reports any problem, and it skips assets already applied, so
             running it twice cannot create duplicates.
@@ -158,21 +162,25 @@ struct Apply: AsyncParsableCommand {
             return
         }
 
-        // Match staged entries back to live assets by local identifier. Chained
-        // means `convert` has already selected for the whole run.
-        let sourceCollection: PHAssetCollection
-        if !chained, source.shouldRefreshSelection {
-            guard let refreshed = try await source.resolveRefreshingSelection() else {
-                print(source.nothingLeftMessage)
-                return
-            }
-            sourceCollection = refreshed
-        } else {
-            sourceCollection = try source.resolve()
-        }
+        // Match staged entries back to live assets by local identifier, over one
+        // scope or, for a bare --year, twelve. Chained means `convert` has
+        // already selected for the whole run.
         var assetsByIdentifier: [String: PHAsset] = [:]
-        for asset in PhotoLibraryAccess.imageAssets(in: sourceCollection) {
-            assetsByIdentifier[asset.localIdentifier] = asset
+        for scope in source.scopes {
+            let sourceCollection: PHAssetCollection
+            if !chained, scope.shouldRefreshSelection {
+                guard let refreshed = try await scope.resolveRefreshingSelection() else { continue }
+                sourceCollection = refreshed
+            } else {
+                sourceCollection = try scope.resolve()
+            }
+            for asset in PhotoLibraryAccess.imageAssets(in: sourceCollection) {
+                assetsByIdentifier[asset.localIdentifier] = asset
+            }
+        }
+        guard !assetsByIdentifier.isEmpty else {
+            print(source.nothingLeftMessage)
+            return
         }
 
         let ledger = try Ledger(url: ledgerURL)

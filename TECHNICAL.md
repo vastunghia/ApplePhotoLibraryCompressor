@@ -57,7 +57,8 @@ copies and leaves deletion to you, in Photos.app.
   idempotent against the *library*, not merely against their own journal.
 - **In month mode every command writes album membership**, putting existing
   photos into `Selected Originals`. That touches no photo and loses nothing, but
-  it does mean `scan` and `calibrate` are not read-only with `--year`/`--month`.
+  it does mean `scan` and `calibrate` are not read-only with `--year`/`--month`
+  — nor with a bare `--year`, which is twelve months of the same.
   `--album` is the form that writes nothing at all.
 - **Everything is journalled** to an append-only, `fsync`ed JSONL ledger before
   any library write, at
@@ -177,6 +178,28 @@ Passing `--quality` explicitly still works and is the way to reproduce an old
 run. Either way, use `calibrate` and **look at the files**: a target that reads
 well as a number can still be visibly wrong on your own photographs, and SSIM
 does not know what the picture is of.
+
+## A year is a loop, not a wider net
+
+`--year` without `--month` covers all twelve months, and it does so by running
+each month in turn rather than by fetching a year at once. That distinction is
+the whole design:
+
+- **The unit of work stays the month.** Same `YYYY-MM` folder, same albums, same
+  fetch bounded by one month's dates. A year of work is indistinguishable from
+  twelve invocations, which is what makes it safe to interrupt: what has been
+  done is already in the library, and the next run finds it there.
+- **Staging is per month, and `convert` cleans up before starting the next.** So
+  the peak on disk is one month's worth however long the run is. It also has to
+  be that way: the journal is scoped to a run by staging path, so a shared
+  directory would have December re-verifying January's files.
+- **A failing month does not abort the year.** It is recorded, the run continues,
+  and a summary at the end names every month and how it ended; the exit code is
+  non-zero if any failed. An hour lost to one bad file should not cost the other
+  eleven months.
+- The expansion lives in exactly one place — the option group that resolves
+  `--year`/`--month`/`--album` into scopes. Everything downstream still receives
+  a single month and is unchanged by the year existing.
 
 ## How the tool knows what is already converted
 

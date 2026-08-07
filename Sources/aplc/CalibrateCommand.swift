@@ -13,8 +13,10 @@ struct Calibrate: AsyncParsableCommand {
             a directory it names at the end, so you can look at them.
 
             With --year and --month it brings that month's "Selected Originals" up
-            to date first, the same work `select` does. --files needs no library
-            access at all.
+            to date first, the same work `select` does. Given --year alone it does
+            so for all twelve months and draws the --samples from the year as a
+            whole, not that many from each month. --files needs no library access
+            at all.
 
             Numbers alone should not decide this. A very high saving usually means
             visible quality loss somewhere in the set — open the files and judge.
@@ -113,19 +115,26 @@ struct Calibrate: AsyncParsableCommand {
 
         guard !source.isEmpty else { return [] }
         try await PhotoLibraryAccess.authorize()
-        let collection: PHAssetCollection
-        if source.shouldRefreshSelection {
-            guard let refreshed = try await source.resolveRefreshingSelection() else {
-                print(source.nothingLeftMessage)
-                return []
-            }
-            collection = refreshed
-        } else {
-            collection = try source.resolve()
-        }
 
-        let eligible = PhotoLibraryAccess.imageAssets(in: collection).filter {
-            EligibilityGate.evaluatePreConditions(PhotoLibraryAccess.traits(for: $0)).isEligible
+        // A whole year is pooled before sampling, not sampled month by month:
+        // --samples means that many files to look at, and twelve times that
+        // many is a different thing than the one that was asked for.
+        var eligible: [PHAsset] = []
+        for scope in source.scopes {
+            let collection: PHAssetCollection
+            if scope.shouldRefreshSelection {
+                guard let refreshed = try await scope.resolveRefreshingSelection() else { continue }
+                collection = refreshed
+            } else {
+                collection = try scope.resolve()
+            }
+            eligible += PhotoLibraryAccess.imageAssets(in: collection).filter {
+                EligibilityGate.evaluatePreConditions(PhotoLibraryAccess.traits(for: $0)).isEligible
+            }
+        }
+        guard !eligible.isEmpty else {
+            print(source.nothingLeftMessage)
+            return []
         }
         // A random sample rather than the first N: the head of an album is often
         // all from one shoot, which would calibrate against a single subject.

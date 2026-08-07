@@ -13,6 +13,16 @@ public struct MonthKey: Hashable, Sendable, Comparable {
     public static func < (a: MonthKey, b: MonthKey) -> Bool {
         (a.year, a.month) < (b.year, b.month)
     }
+
+    /// The twelve months of a year, in order.
+    ///
+    /// A year of work is a loop over these, never a wider fetch: the unit of
+    /// work stays the month, so every folder, every staging directory and every
+    /// answer to "already converted" is the same as if the month had been asked
+    /// for on its own.
+    public static func months(inYear year: Int) -> [MonthKey] {
+        (1...12).map { MonthKey(year: year, month: $0) }
+    }
 }
 
 /// Where the tool puts things in the photo library, and what it calls them.

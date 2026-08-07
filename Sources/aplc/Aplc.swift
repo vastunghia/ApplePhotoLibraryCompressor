@@ -16,11 +16,16 @@ struct Aplc: AsyncParsableCommand {
 
               aplc convert --year 2019 --month 7
 
+            Leave --month out and it works through all twelve months of the year
+            in turn, each one exactly as if you had asked for it alone:
+
+              aplc convert --year 2019
+
             Only `apply` and `convert` create assets, and both say so: `apply`
             needs --confirm, and on `convert` typing the command is the
             confirmation, with --dry-run to hold it back.
 
-            But with --year and --month every command also gathers that month's
+            But with --year every command also gathers each month's
             unconverted JPEGs into "Selected Originals" before doing its own work
             — the job `select` does, now done for you. That is an album write, so
             in month mode `scan` and `calibrate` are not read-only either. Pass

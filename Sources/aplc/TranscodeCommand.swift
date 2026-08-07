@@ -18,7 +18,9 @@ struct Transcode: AsyncParsableCommand {
             way to carry a conversion through in one piece.
 
             With --year and --month it first brings that month's "Selected
-            Originals" up to date, the same work `select` does.
+            Originals" up to date, the same work `select` does. Given --year
+            alone it does that for all twelve months and encodes them as one
+            queue, so --limit counts across the year rather than per month.
             """
     )
 
@@ -48,19 +50,31 @@ struct Transcode: AsyncParsableCommand {
         }
         try await PhotoLibraryAccess.authorize()
 
-        // Chained means `convert` has already selected for the whole run; doing
-        // it again here would be a second pass over the month for nothing.
-        let collection: PHAssetCollection
-        if !chained, source.shouldRefreshSelection {
-            guard let refreshed = try await source.resolveRefreshingSelection() else {
-                print(source.nothingLeftMessage)
-                return
+        // One scope unless a bare --year was given. The months are gathered into
+        // a single queue rather than transcoded a month at a time: encoding is
+        // per asset and knows nothing about months, so a year is one long list
+        // and one honest summary at the end.
+        var assets: [PHAsset] = []
+        for scope in source.scopes {
+            // Chained means `convert` has already selected for the whole run;
+            // doing it again here would be a second pass over the month for
+            // nothing.
+            let collection: PHAssetCollection
+            if !chained, scope.shouldRefreshSelection {
+                guard let refreshed = try await scope.resolveRefreshingSelection() else {
+                    print(scope.nothingLeftMessage)
+                    continue
+                }
+                collection = refreshed
+            } else {
+                collection = try scope.resolve()
             }
-            collection = refreshed
-        } else {
-            collection = try source.resolve()
+            assets += PhotoLibraryAccess.imageAssets(in: collection)
         }
-        let assets = PhotoLibraryAccess.imageAssets(in: collection)
+        guard !assets.isEmpty else {
+            print(source.nothingLeftMessage)
+            return
+        }
 
         let area = try staging.makeArea()
         defer { area.cleanUp() }

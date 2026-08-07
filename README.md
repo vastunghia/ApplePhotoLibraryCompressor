@@ -124,6 +124,32 @@ Why the rest are excluded
 instant. A month is a coffee; a large library is days of machine time, which is
 why the tool is built around working through it a month at a time.
 
+### Or a whole year, unattended
+
+Leave `--month` out and it works through all twelve months of that year, in
+order:
+
+```sh
+aplc convert --year 2019
+```
+
+Each month is done exactly as if you had asked for it on its own — same albums,
+same checks, its own temporary staging that goes away before the next month
+starts. What changes is only that you type it once.
+
+Three things worth knowing before you leave it running:
+
+- **A month that fails does not stop the rest.** It is reported in a summary at
+  the end, one line per month, and the command exits non-zero so a script still
+  notices.
+- **Interrupting is safe, and so is starting again.** Whether a photo is already
+  converted is a question the tool asks your library, not a note it keeps, so a
+  second run simply picks up what the first did not finish.
+- **A year is long.** Start with `aplc scan --year 2019` to see how much there is,
+  or `--dry-run` to watch the whole thing decide without writing anything.
+
+`scan`, `select` and `calibrate` take a bare `--year` too.
+
 Note that `convert` writes without asking for confirmation: typing it *is* the
 confirmation, and `--dry-run` is how you hold it back. Nothing it writes is
 irreversible — the worst case is copies you delete by hand.
@@ -217,12 +243,15 @@ looking at things:
 | `aplc select --year Y --month M` | Just the "what is left to convert" step, on its own. |
 | `aplc transcode` / `verify` / `apply` | The individual stages. Staging is temporary, so they cannot hand work to each other across separate runs — `convert` is what runs them in one process. |
 
+Each of these takes a bare `--year Y` as well, meaning all twelve months.
+
 Options worth knowing:
 
 | Option | |
 |---|---|
+| `--year Y` without `--month` | Work through all twelve months of that year, one at a time. |
 | `--album "Name"` | Work on an album you made by hand instead of a month. The only form that writes nothing at all. |
-| `--limit N` | Stop after N photos. |
+| `--limit N` | Stop after N photos. `convert --year Y` applies it to each month. |
 | `--dry-run` | Do everything except write to the library. |
 | `--min-ssim` | The fidelity target every conversion must reach. Default 0.97. |
 | `--quality` | Fix the encoder quality instead of searching per photo. See [TECHNICAL.md](TECHNICAL.md#quality-is-chosen-per-photo). |

@@ -16,6 +16,9 @@ struct Scan: AsyncParsableCommand {
             scanned without a preparatory command. Pass --album instead to report
             on an album exactly as it stands, writing nothing at all.
 
+            Given --year alone it censuses all twelve months and prints a total
+            for the year underneath.
+
             Byte totals are deliberately absent: PhotoKit exposes no public API for
             a resource's file size, so the only honest way to measure the saving is
             to run `transcode`, which reports it from files it actually wrote.
@@ -30,13 +33,30 @@ struct Scan: AsyncParsableCommand {
     func validate() throws { try source.requireSelection() }
 
     func run() async throws {
-        guard let census = try await Self.census(source: source, verbose: verbose) else {
-            print(source.nothingLeftMessage)
-            return
-        }
-        Self.report(census, album: source.displayName)
+        // One scope unless a bare --year was given, in which case twelve. Each
+        // is censused on its own, exactly as if it had been asked for alone.
+        let scopes = source.scopes
+        var yearTotal = Census()
 
-        if census.eligible > 0 {
+        for scope in scopes {
+            guard let census = try await Self.census(source: scope, verbose: verbose) else {
+                print(scope.nothingLeftMessage)
+                continue
+            }
+            Self.report(census, album: scope.displayName)
+            yearTotal.add(census)
+        }
+
+        if scopes.count > 1 {
+            print("\nAll of \(source.year.map(String.init) ?? "the year")")
+            print(Format.table([
+                ("images in the workspace's albums", "\(yearTotal.total)"),
+                ("convertible", "\(yearTotal.eligible)"),
+                ("not convertible", "\(yearTotal.total - yearTotal.eligible)"),
+            ]))
+        }
+
+        if yearTotal.eligible > 0 {
             let next = source.forwardedArguments.joined(separator: " ")
             print("""
 
@@ -49,6 +69,12 @@ struct Scan: AsyncParsableCommand {
         var total = 0
         var eligible = 0
         var skips: [SkipReason: Int] = [:]
+
+        mutating func add(_ other: Census) {
+            total += other.total
+            eligible += other.eligible
+            for (reason, count) in other.skips { skips[reason, default: 0] += count }
+        }
     }
 
     /// Shared with `convert`, which needs the counts rather than the printout —

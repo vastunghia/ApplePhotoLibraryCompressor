@@ -25,6 +25,9 @@ struct Select: AsyncParsableCommand {
             find it from --year and --month alone. --album overrides that with a
             flat album of your own naming.
 
+            Leave --month out and it does the whole year, one month's album at a
+            time, and prints a total for the year at the end.
+
             Re-running is safe: photos already in the album are not added twice.
 
             This is the only command that reads outside a named album, which it
@@ -36,8 +39,8 @@ struct Select: AsyncParsableCommand {
     @Option(help: "Year the photos were taken, e.g. 2019.")
     var year: Int
 
-    @Option(help: "Month the photos were taken, 1 to 12.")
-    var month: Int
+    @Option(help: "Month the photos were taken, 1 to 12. Omit to select the whole year.")
+    var month: Int?
 
     @Option(help: "Fill this flat album instead of the workspace's month folder.")
     var album: String?
@@ -46,7 +49,7 @@ struct Select: AsyncParsableCommand {
     var verbose: Bool = false
 
     func validate() throws {
-        guard (1...12).contains(month) else {
+        if let month, !(1...12).contains(month) {
             throw ValidationError("--month must be between 1 and 12, not \(month).")
         }
         guard (1...9999).contains(year) else {
@@ -54,29 +57,60 @@ struct Select: AsyncParsableCommand {
         }
     }
 
-    /// Where the photos will go, spelled as the user would find it in Photos.
-    private var destinationName: String {
+    /// Where a month's photos will go, spelled as the user would find it in Photos.
+    private func destinationName(for key: MonthKey) -> String {
         if let album { return "\"\(album)\"" }
-        let folder = WorkspaceLayout.monthFolder(MonthKey(year: year, month: month))
+        let folder = WorkspaceLayout.monthFolder(key)
         return "\(WorkspaceLayout.rootFolder) > \(folder) > \(WorkspaceLayout.originalsAlbum)"
     }
 
-    func run() async throws {
-        let outcome = try await Self.fill(year: year, month: month, into: album, verbose: verbose)
+    /// The months to fill: the one asked for, or all twelve of the year.
+    private var months: [MonthKey] {
+        guard let month else { return MonthKey.months(inYear: year) }
+        return [MonthKey(year: year, month: month)]
+    }
 
-        guard outcome.destination != nil else {
-            if outcome.selection.considered == 0 {
-                print("No photos were taken in \(outcome.label). Nothing to do.")
-            } else {
-                report(outcome, alreadyInAlbum: 0, added: 0)
-                print("\nNothing in \(outcome.label) is left to convert. Nothing was created.")
+    func run() async throws {
+        let months = self.months
+        var yearTotals = Totals()
+
+        for key in months {
+            let outcome = try await Self.fill(year: key.year, month: key.month,
+                                              into: album, verbose: verbose)
+            yearTotals.add(outcome)
+
+            guard outcome.destination != nil else {
+                if outcome.selection.considered == 0 {
+                    print("No photos were taken in \(outcome.label). Nothing to do.")
+                } else {
+                    report(outcome, for: key, alreadyInAlbum: 0, added: 0)
+                    print("\nNothing in \(outcome.label) is left to convert. Nothing was created.")
+                }
+                continue
             }
-            return
+
+            report(outcome, for: key,
+                   alreadyInAlbum: outcome.alreadyInAlbum, added: outcome.added)
         }
 
-        report(outcome, alreadyInAlbum: outcome.alreadyInAlbum, added: outcome.added)
+        if months.count > 1 {
+            print("\n\(year)")
+            print(Format.table([
+                ("photos in the year", "\(yearTotals.considered)"),
+                ("JPEGs already converted", "\(yearTotals.alreadyConverted)"),
+                ("JPEGs still to convert", "\(yearTotals.candidates)"),
+                ("added to the workspace", "\(yearTotals.added)"),
+            ]))
+        }
 
-        let next = album.map { "--album \"\($0)\"" } ?? "--year \(year) --month \(month)"
+        let next: String
+        if let album {
+            next = "--album \"\(album)\""
+        } else if let month {
+            next = "--year \(year) --month \(month)"
+        } else {
+            next = "--year \(year)"
+        }
         print("""
 
             Your photos are untouched — an album holds references, not copies, and \
@@ -86,8 +120,24 @@ struct Select: AsyncParsableCommand {
             """)
     }
 
+    /// What a year came to, summed as the months go by.
+    private struct Totals {
+        var considered = 0
+        var alreadyConverted = 0
+        var candidates = 0
+        var added = 0
+
+        mutating func add(_ outcome: Outcome) {
+            considered += outcome.selection.considered
+            alreadyConverted += outcome.selection.alreadyConverted
+            candidates += outcome.selection.candidates.count
+            added += outcome.added
+        }
+    }
+
     private func report(
         _ outcome: Outcome,
+        for key: MonthKey,
         alreadyInAlbum: Int,
         added: Int
     ) {
@@ -100,7 +150,7 @@ struct Select: AsyncParsableCommand {
             ("JPEGs already converted", "\(selection.alreadyConverted)"),
             ("JPEGs still to convert", "\(selection.candidates.count)"),
             ("already in the album", "\(alreadyInAlbum)"),
-            ("added to \(destinationName)", "\(added)"),
+            ("added to \(destinationName(for: key))", "\(added)"),
         ]))
 
         let excluded = selection.skips.filter { $0.key != .alreadyApplied }
