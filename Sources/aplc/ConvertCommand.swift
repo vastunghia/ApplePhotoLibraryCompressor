@@ -63,6 +63,9 @@ struct Convert: AsyncParsableCommand {
     @Option(help: "Stop after this many assets per month, in both transcode and apply.")
     var limit: Int?
 
+    @Option(help: "How many photos to convert at once. Defaults to half the CPU cores; more is barely faster.")
+    var jobs: Int = Transcode.defaultJobs
+
     @Flag(name: .customLong("dry-run"),
           help: "Do everything except write to the library.")
     var dryRun: Bool = false
@@ -240,6 +243,7 @@ struct Convert: AsyncParsableCommand {
         arguments += scope.forwardedArguments
         arguments += gateArguments()
         if let limit { arguments += ["--limit", "\(limit)"] }
+        arguments += ["--jobs", "\(jobs)"]
         return arguments
     }
 

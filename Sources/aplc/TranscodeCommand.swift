@@ -13,6 +13,11 @@ struct Transcode: AsyncParsableCommand {
             outcome in the journal. The exported JPEG is deleted afterwards — the
             library still holds it, so keeping a second copy only wastes space.
 
+            Several photos are converted at once — see --jobs — because the encoder
+            and the fidelity check use the machine very differently: one spreads
+            itself over most of the cores, the other is one core for the whole of
+            its run. Results are still reported and journalled in album order.
+
             Staging is a temporary directory that goes away when the run ends, so
             on its own this command leaves you nothing to apply. `convert` is the
             way to carry a conversion through in one piece.
@@ -37,12 +42,52 @@ struct Transcode: AsyncParsableCommand {
     @Option(help: "Stop after this many assets.")
     var limit: Int?
 
+    @Option(help: "How many photos to convert at once. Defaults to half the CPU cores; more is barely faster.")
+    var jobs: Int = Self.defaultJobs
+
     // Set by `convert`, which runs the next step itself. Hidden because it says
     // nothing about what the command does — only about who is calling it.
     @Flag(name: .customLong("chained"), help: .hidden)
     var chained: Bool = false
 
-    func validate() throws { try source.requireSelection() }
+    /// Half the cores, on a curve that is flat above it. Measured on twelve real
+    /// photographs on six cores, alternating settings: 56.2 / 55.9 / 55.3 s at
+    /// three, four and six workers — a spread of about 3%, which is noise on a
+    /// machine doing anything else at all.
+    ///
+    /// It is flat because ImageIO's encode is a process-wide serial resource, so
+    /// past the point where there is always one photo encoding, extra workers
+    /// have nothing left to overlap. Half the cores reaches that point and leaves
+    /// the machine usable, which is the whole reason to prefer it.
+    ///
+    /// It has not always been flat: before the search interpolated, more workers
+    /// meant more of them starting with a cold seed — 4.4 encodes per photo at
+    /// six against 3.2 at one — which made `--jobs 6` genuinely *slower*. That
+    /// penalty is gone (2.9 against 2.8), so do not reintroduce the old advice.
+    static var defaultJobs: Int {
+        max(1, ProcessInfo.processInfo.activeProcessorCount / 2)
+    }
+
+    func validate() throws {
+        try source.requireSelection()
+        guard jobs >= 1 else {
+            throw ValidationError("--jobs must be at least 1, not \(jobs).")
+        }
+    }
+
+    /// One photo's worth of work, with every library read already done.
+    ///
+    /// That is the point of the type: `PHAsset` and `PHAssetResource` are read on
+    /// the way in, in album order, so nothing running in parallel afterwards has
+    /// to touch PhotoKit. `@unchecked Sendable` says exactly that — the resource
+    /// is a value read out of the library and never written to.
+    private struct Job: @unchecked Sendable {
+        let traits: AssetTraits
+        let resource: PHAssetResource
+        let exportedURL: URL
+        let heicURL: URL
+        let text: AssetTextMetadata?
+    }
 
     func run() async throws {
         guard Transcoder.canWriteHEIC else {
@@ -113,11 +158,76 @@ struct Transcode: AsyncParsableCommand {
         let exporter = OriginalExporter(downloadBudgetBytes: budget)
         let policy = gate.policy(allowDownloads: allowDownloads)
         let search = QualitySearch(targetSSIM: gate.minSSIM)
-        if gate.quality == nil {
+        let fixedQuality = gate.quality
+        if fixedQuality == nil {
             print("Choosing quality per photo to reach SSIM \(gate.minSSIM).")
         }
 
-        var processed = 0
+        // ---------------------------------------------------------------
+        // 1. Plan. Every PhotoKit read happens here, in album order, before
+        //    anything runs alongside anything else. Each photo comes out of this
+        //    as one of two things: a journal line already decided, or a job.
+        // ---------------------------------------------------------------
+        // The two halves of the plan, both carrying the index that puts a photo
+        // back in album order. Kept apart rather than as an array of optionals so
+        // that dispatching cannot reach for a job that is not there — a slot
+        // missed there would leave the recorder waiting for it forever.
+        var queued: [(index: Int, job: Job)] = []
+        var decided: [(index: Int, outcome: AssetConversion.Outcome)] = []
+        var slots = 0
+        var examined = 0
+
+        for asset in assets {
+            if let limit, examined >= limit { break }
+            // Checked before counting, exactly as when this was one loop: --limit
+            // means "examine this many", and a photo an earlier run already
+            // staged was never examined.
+            if alreadyDone.contains(asset.localIdentifier) { continue }
+            examined += 1
+
+            let traits = PhotoLibraryAccess.traits(for: asset)
+            let index = slots
+            slots += 1
+
+            if case .skip(let reason) = EligibilityGate.evaluatePreConditions(traits, policy: policy) {
+                decided.append((index, Self.skipOutcome(traits, reason)))
+                continue
+            }
+            guard let resource = PhotoLibraryAccess.originalPhotoResource(for: asset) else {
+                decided.append((index, Self.skipOutcome(traits, .notAJPEG)))
+                continue
+            }
+
+            let stem = Format.safeFilename(for: asset.localIdentifier)
+            queued.append((index, Job(
+                traits: traits,
+                resource: resource,
+                exportedURL: area.originalsDirectory
+                    .appendingPathComponent(stem).appendingPathExtension("jpg"),
+                heicURL: area.heicDirectory
+                    .appendingPathComponent(stem).appendingPathExtension("heic"),
+                text: textMetadata[asset.localIdentifier]
+            )))
+        }
+
+        let workers = min(jobs, max(1, queued.count))
+        if workers > 1 {
+            // Said out loud because it changes how the output behaves: lines
+            // appear in bursts rather than one at a steady pace, and the machine
+            // is busy for the whole run.
+            print("Converting \(workers) photos at once.")
+        }
+
+        // ---------------------------------------------------------------
+        // 2 & 3. Convert in parallel, record in album order.
+        //
+        // The workers only compute; every journal write, every printed line and
+        // every counter belongs to this task alone. That is what makes the totals
+        // safe without a single lock, and what keeps the journal in the order the
+        // photos are in — so two runs of the same month stay comparable line by
+        // line, and `apply --limit` still picks the same photos.
+        // ---------------------------------------------------------------
+        var sink = OrderedSink<AssetConversion.Outcome>()
         var converted = 0
         var withText = 0
         var sourceBytes = 0
@@ -128,173 +238,79 @@ struct Transcode: AsyncParsableCommand {
         var probes = 0
         var searched = 0
 
-        for asset in assets {
-            if let limit, processed >= limit { break }
-            if alreadyDone.contains(asset.localIdentifier) { continue }
+        func record(_ outcome: AssetConversion.Outcome) throws {
+            try ledger.append(outcome.entry)
+            probes += outcome.probes
+            if outcome.searched { searched += 1 }
 
-            let traits = PhotoLibraryAccess.traits(for: asset)
-            processed += 1
-
-            if case .skip(let reason) = EligibilityGate.evaluatePreConditions(traits, policy: policy) {
-                skips[reason, default: 0] += 1
-                try ledger.append(LedgerEntry(
-                    outcome: .skipped,
-                    sourceLocalIdentifier: traits.localIdentifier,
-                    originalFilename: traits.originalFilename,
-                    skipReason: reason
-                ))
-                continue
-            }
-
-            guard let resource = PhotoLibraryAccess.originalPhotoResource(for: asset) else {
-                skips[.notAJPEG, default: 0] += 1
-                try ledger.append(LedgerEntry(
-                    outcome: .skipped,
-                    sourceLocalIdentifier: traits.localIdentifier,
-                    originalFilename: traits.originalFilename,
-                    skipReason: .notAJPEG
-                ))
-                continue
-            }
-
-            let stem = Format.safeFilename(for: asset.localIdentifier)
-            let exportedURL = area.originalsDirectory
-                .appendingPathComponent(stem).appendingPathExtension("jpg")
-            let heicURL = area.heicDirectory
-                .appendingPathComponent(stem).appendingPathExtension("heic")
-
-            // The exported original is scratch space; the library keeps the real one.
-            defer { try? FileManager.default.removeItem(at: exportedURL) }
-
-            do {
-                _ = try await exporter.export(resource: resource, to: exportedURL)
-            } catch {
-                let reason: SkipReason = allowDownloads ? .downloadBudgetExhausted : .notLocallyAvailable
-                skips[reason, default: 0] += 1
-                try ledger.append(LedgerEntry(
-                    outcome: .skipped,
-                    sourceLocalIdentifier: traits.localIdentifier,
-                    originalFilename: traits.originalFilename,
-                    skipReason: reason
-                ))
-                continue
-            }
-
-            do {
-                // nil when Photos was unreachable: leave the file's own metadata
-                // alone rather than guess. Otherwise the set from Photos wins,
-                // even when empty, so stale embedded keywords get cleared.
-                let assetText = textMetadata[asset.localIdentifier]
-                let keywordsToEmbed = textMetadataAvailable ? (assetText?.keywords ?? []) : nil
-
-                let result: TranscodeResult
-                let score: QualityScore
-
-                if let fixedQuality = gate.quality {
-                    result = try Transcoder(quality: fixedQuality).transcode(
-                        source: exportedURL, destination: heicURL, keywords: keywordsToEmbed
-                    )
-                    score = try QualityMetrics.compare(exportedURL, heicURL)
-                } else {
-                    let found = try search.search(
-                        source: exportedURL,
-                        destination: heicURL,
-                        keywords: keywordsToEmbed,
-                        seedIndex: Self.median(of: chosenRungs)
-                    )
-                    probes += found.probes
-                    searched += 1
-
-                    guard let accepted = found.accepted else {
-                        // Not even the top rung reached the target. Skipping is
-                        // the same answer as before; the search only means we
-                        // now know no quality would have worked.
-                        skips[.qualityBelowThreshold, default: 0] += 1
-                        try ledger.append(LedgerEntry(
-                            outcome: .skipped,
-                            sourceLocalIdentifier: traits.localIdentifier,
-                            originalFilename: traits.originalFilename,
-                            skipReason: .qualityBelowThreshold,
-                            quality: QualityLadder.rungs.last,
-                            ssim: found.bestSSIM
-                        ))
-                        continue
-                    }
-                    chosenRungs.append(accepted.rungIndex)
-                    result = accepted.result
-                    score = accepted.score
-                }
-
-                let outcome = EligibilityGate.evaluatePostConditions(
-                    source: result.sourceFacts,
-                    destination: result.destinationFacts,
-                    quality: score,
-                    policy: policy
-                )
-
-                if case .skip(let reason) = outcome {
-                    skips[reason, default: 0] += 1
-                    // A rejected encode must not linger where `apply` might find it.
-                    try? FileManager.default.removeItem(at: heicURL)
-                    try ledger.append(LedgerEntry(
-                        outcome: .skipped,
-                        sourceLocalIdentifier: traits.localIdentifier,
-                        originalFilename: traits.originalFilename,
-                        skipReason: reason,
-                        sourceBytes: result.sourceBytes,
-                        stagedBytes: result.destinationBytes,
-                        quality: result.quality,
-                        ssim: score.ssim,
-                        psnr: score.psnr.isFinite ? score.psnr : nil
-                    ))
-                    continue
-                }
-
+            switch outcome.kind {
+            case .converted(let result):
                 converted += 1
-                if assetText?.isEmpty == false { withText += 1 }
-                sourceBytes += result.sourceBytes
-                heicBytes += result.destinationBytes
-
-                try ledger.append(LedgerEntry(
-                    outcome: .transcoded,
-                    sourceLocalIdentifier: traits.localIdentifier,
-                    originalFilename: traits.originalFilename,
-                    stagedPath: heicURL.path,
-                    sourceSHA256: try? Digest.sha256(of: exportedURL),
-                    stagedSHA256: try? Digest.sha256(of: heicURL),
-                    sourceBytes: result.sourceBytes,
-                    stagedBytes: result.destinationBytes,
-                    quality: result.quality,
-                    ssim: score.ssim,
-                    psnr: score.psnr.isFinite ? score.psnr : nil,
-                    sourceFacts: result.sourceFacts,
-                    stagedFacts: result.destinationFacts,
-                    sourceTextMetadata: assetText
-                ))
-
+                if outcome.entry.sourceTextMetadata?.isEmpty == false { withText += 1 }
+                sourceBytes += result.result.sourceBytes
+                heicBytes += result.result.destinationBytes
                 print(String(format: "  %@  %@ -> %@  (%@ saved, q=%.2f, SSIM %.4f)",
-                             traits.originalFilename,
-                             Format.bytes(result.sourceBytes),
-                             Format.bytes(result.destinationBytes),
-                             Format.percent(result.savedFraction),
-                             result.quality,
-                             score.ssim))
-            } catch {
-                try? FileManager.default.removeItem(at: heicURL)
-                skips[.transcodeFailed, default: 0] += 1
-                try ledger.append(LedgerEntry(
-                    outcome: .failed,
-                    sourceLocalIdentifier: traits.localIdentifier,
-                    originalFilename: traits.originalFilename,
-                    error: "\(error)"
+                             outcome.entry.originalFilename,
+                             Format.bytes(result.result.sourceBytes),
+                             Format.bytes(result.result.destinationBytes),
+                             Format.percent(result.result.savedFraction),
+                             result.result.quality,
+                             result.score.ssim))
+            case .notConverted(let reason):
+                skips[reason, default: 0] += 1
+            }
+        }
+
+        // Photos the gate refused without reading a byte. Parked at their own
+        // index so they still print between the conversions they sit between.
+        for (index, outcome) in decided {
+            for ready in sink.insert(outcome, at: index) { try record(ready) }
+        }
+
+        var cursor = 0
+
+        func dispatch(_ group: inout ThrowingTaskGroup<(Int, AssetConversion.Outcome), any Error>) {
+            guard cursor < queued.count else { return }
+            let (index, job) = queued[cursor]
+            cursor += 1
+            // Read at dispatch, not inside the worker: the seed is this task's
+            // to decide, so the workers share no state at all.
+            let seed = Self.median(of: chosenRungs)
+            group.addTask {
+                (index, await Self.convert(
+                    job,
+                    seedIndex: seed,
+                    exporter: exporter,
+                    policy: policy,
+                    search: search,
+                    fixedQuality: fixedQuality,
+                    textIsAuthoritative: textMetadataAvailable,
+                    allowDownloads: allowDownloads
                 ))
+            }
+        }
+
+        try await withThrowingTaskGroup(of: (Int, AssetConversion.Outcome).self) { group in
+            for _ in 0..<workers { dispatch(&group) }
+
+            while let (index, outcome) = try await group.next() {
+                // Fed as soon as a photo finishes rather than when it is recorded:
+                // a slow photo must not freeze what every later search starts
+                // from. The cost is that the seed depends on timing, so the probe
+                // count varies between runs — never the guarantee, since the rung
+                // finally returned has always been measured against the target.
+                if case .converted(let result) = outcome.kind, let rung = result.rungIndex {
+                    chosenRungs.append(rung)
+                }
+                dispatch(&group)
+                for ready in sink.insert(outcome, at: index) { try record(ready) }
             }
         }
 
         let downloaded = await exporter.downloadedBytes
         print("\nTranscode summary")
         print(Format.table([
-            ("examined", "\(processed)"),
+            ("examined", "\(examined)"),
             ("staged for conversion", "\(converted)"),
             ("quality", Self.qualitySummary(gate.quality, chosenRungs: chosenRungs,
                                             probes: probes, searched: searched)),
@@ -330,6 +346,64 @@ struct Transcode: AsyncParsableCommand {
                     """)
             }
         }
+    }
+
+    /// Exports one original and converts it. The only part of a run that several
+    /// photos are in at once, and it shares nothing: every argument is a value,
+    /// and the exporter is an actor that meters the iCloud budget for all of them.
+    private static func convert(
+        _ job: Job,
+        seedIndex: Int?,
+        exporter: OriginalExporter,
+        policy: GatePolicy,
+        search: QualitySearch,
+        fixedQuality: Double?,
+        textIsAuthoritative: Bool,
+        allowDownloads: Bool
+    ) async -> AssetConversion.Outcome {
+        // The exported original is scratch space; the library keeps the real one.
+        defer { try? FileManager.default.removeItem(at: job.exportedURL) }
+
+        do {
+            _ = try await exporter.export(resource: job.resource, to: job.exportedURL)
+        } catch {
+            let reason: SkipReason = allowDownloads ? .downloadBudgetExhausted : .notLocallyAvailable
+            return skipOutcome(job.traits, reason)
+        }
+
+        // The encoding and the fidelity check are the blocking part, so they go
+        // to an ordinary thread; this task suspends until they are done. Putting
+        // them on a cooperative thread instead deadlocks the run — see
+        // `BlockingWork`, where the measurement is.
+        return await BlockingWork.run {
+            AssetConversion.run(
+                source: job.exportedURL,
+                destination: job.heicURL,
+                traits: job.traits,
+                text: job.text,
+                textIsAuthoritative: textIsAuthoritative,
+                policy: policy,
+                fixedQuality: fixedQuality,
+                search: search,
+                seedIndex: seedIndex
+            )
+        }
+    }
+
+    /// A skip decided before any encoding — by the gate, by there being no JPEG
+    /// original, or by the original not being on disk.
+    private static func skipOutcome(_ traits: AssetTraits, _ reason: SkipReason) -> AssetConversion.Outcome {
+        AssetConversion.Outcome(
+            entry: LedgerEntry(
+                outcome: .skipped,
+                sourceLocalIdentifier: traits.localIdentifier,
+                originalFilename: traits.originalFilename,
+                skipReason: reason
+            ),
+            kind: .notConverted(reason),
+            probes: 0,
+            searched: false
+        )
     }
 
     /// Where the next search should start: the middle of what this album has

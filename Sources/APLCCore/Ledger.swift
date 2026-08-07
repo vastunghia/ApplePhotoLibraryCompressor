@@ -175,6 +175,12 @@ public final class Ledger {
     deinit { try? handle.close() }
 
     /// Writes one entry and does not return until it is durably on disk.
+    ///
+    /// **One caller at a time.** The handle and the encoder are shared state and
+    /// there is no lock here, because nothing needs one: `transcode` converts
+    /// several photos at once but records them from a single task, deliberately —
+    /// that is also what keeps the journal in album order. A caller that ever
+    /// wants to append from a worker has to add the lock first.
     public func append(_ entry: LedgerEntry) throws {
         var data = try encoder.encode(entry)
         data.append(0x0A)
