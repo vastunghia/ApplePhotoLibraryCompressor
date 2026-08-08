@@ -164,6 +164,25 @@ aspect and content produced identical boundaries, so the quantisation belongs to
 the encoder, not to the picture. `aplc` therefore searches a ladder of 20 real
 rungs rather than a continuum.
 
+Two caveats on that, and they matter more the further you are from the machine it
+was measured on. It was one ImageIO, on one Intel Mac; and the conclusion that
+the boundaries belong to the encoder rests on two *images* agreeing, never on two
+*encoders* agreeing. Another implementation — Apple Silicon's, a future macOS —
+could quantise somewhere else entirely. Correctness does not depend on this:
+every rung the search accepts has been measured against your target, whatever the
+ladder claims. Efficiency does. **The ladder is the one part of this tool that is
+calibration rather than logic**, and it is the thing most worth re-measuring on
+new hardware.
+
+At scale the ladder turned out to be well placed for the work. Across 1,997 real
+conversions the chosen rungs clustered in the middle — 0.76 and 0.79 together
+took a third of all photos — while both ends were barely used: 2.5% settled on
+the bottom rung 0.40, and 0.2% went above 0.88. So the floor is mildly binding,
+in that some of those photos still had SSIM to spare and might have passed lower
+still; but they are by definition the *easy* photographs and therefore already
+small, and all of them together are **0.88% of the bytes produced**. Extending
+the ladder downwards would buy close to nothing.
+
 ### The search interpolates rather than bisecting
 
 Every probe measures an SSIM, and bisection would reduce that number to a single
@@ -178,8 +197,20 @@ extrapolation to where the curve crosses the target, and two support a secant
 that corrects it with the photograph's own slope.
 
 The result on a real month: **2.9 encodes per photo against 3.9**, reaching
-exactly the same qualities and the same SSIMs. Two things about it are worth
-stating plainly:
+exactly the same qualities and the same SSIMs. It then held at scale — over a
+full year of 1,997 photographs across twelve months and several cameras the
+average was **2.96, with no month outside 2.8–3.1**. The slope and the method
+were derived from eight curves belonging to a single month; that they generalised
+without one month drifting is the part worth trusting, more than the number.
+
+The same run shows the search is not overshooting, which is where the saving
+actually comes from. Against a target of 0.97, accepted encodes averaged **SSIM
+0.9724**; 12% of photographs landed within 0.0005 of the bar and the highest sat
+at 0.9858. Exactly one photograph in 1,998 could not be satisfied by any rung and
+was skipped rather than degraded — at the top of the ladder it still measured
+0.9632.
+
+Two things about the method are worth stating plainly:
 
 - **It is interpolation, not prediction.** Nothing is learned, nothing is stored
   between photos, and there is no model of your library. The one global constant
@@ -213,8 +244,8 @@ does not know what the picture is of.
 The two halves of a probe use the machine in opposite ways, and that asymmetry
 is the whole reason `transcode` converts more than one photo at a time.
 
-Measured on 20–22 MP JPEGs on a six-core machine, timing each phase against the
-process's own CPU time to see how many cores it really occupied:
+Measured on 20–22 MP JPEGs on a six-core Intel machine, timing each phase against
+the process's own CPU time to see how many cores it really occupied:
 
 | phase | wall | cores used |
 |---|---|---|
@@ -371,6 +402,14 @@ the whole design:
 - The expansion lives in exactly one place — the option group that resolves
   `--year`/`--month`/`--album` into scopes. Everything downstream still receives
   a single month and is unchanged by the year existing.
+
+Measured on a full year: 1,998 photographs examined, 1,997 converted, one skipped
+at the gate, no failures, and `verify` clean in all twelve months. **Encoding is
+the whole cost at this scale too** — selecting, scanning, importing and verifying
+twelve months together came to a rounding error against 166 minutes of
+transcoding, which is the same conclusion reached at one month, now at a hundred
+times the size. Per-month failure isolation was never needed, and remains the
+kind of thing that has to exist before the run that needs it.
 
 ## How the tool knows what is already converted
 

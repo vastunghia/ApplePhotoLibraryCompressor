@@ -18,8 +18,21 @@ quality setting: for each photo it searches for the **cheapest encoder setting
 that still reaches the fidelity you asked for** (SSIM 0.97 by default), by
 encoding and measuring rather than by assuming.
 
-That is not a detail — it is where the saving comes from. On one set of
-photographs, compared with a fixed `--quality 0.8`:
+**Expect around 75%.** Measured over a full year — about 2,000 photographs,
+twelve months, several cameras — 18.2 GB of JPEG became 4.5 GB of HEIC, a saving
+of **74.5%**, and no single month fell outside 73.7%–78.3%. The consistency is
+worth more than the headline figure: it is what lets you plan a library.
+
+Two things move that number, and it is worth knowing which way:
+
+- **How generously the originals were encoded.** Those were high-quality JPEG
+  exports from a raw workflow, and that is where the fat is. Photos written
+  straight out of a phone are already closer to the bone and will give up less.
+- **The fidelity you ask for.** SSIM 0.97 is the default; `--min-ssim` moves it,
+  and the saving moves with it.
+
+Searching per photo is where most of that comes from. On one set of photographs,
+against a fixed `--quality 0.8`:
 
 | | space saved | SSIM range |
 |---|---|---|
@@ -27,8 +40,10 @@ photographs, compared with a fixed `--quality 0.8`:
 | automatic, target 0.97 | **82.6%** | 0.9703 – 0.9735 |
 
 The fixed setting was overshooting the bar it had been given, and paying for it
-in bytes. Your own photographs will differ; `aplc calibrate` lets you see the
-trade-off on them before you commit.
+in bytes. Read that table as the shape of the argument rather than as a forecast:
+it is five photographs from one shoot, an easy set, which is why it flatters the
+74.5% above. `aplc calibrate` shows you the trade-off on your own pictures before
+you commit to anything.
 
 ### It cannot destroy anything
 
@@ -42,7 +57,9 @@ trade-off on them before you commit.
 - **Every conversion must pass a gate.** Edited photos, Live Photos, HDR photos
   that would lose their gain map, anything that loses metadata or fails the
   fidelity target — all skipped, with a recorded reason, never converted
-  approximately.
+  approximately. Failing the fidelity bar is rare in practice: across 2,000
+  photographs it happened once, to a photo no setting on the ladder could
+  encode well enough, which was left alone.
 - **Deletion is yours, in Photos.app.** The tool gathers the JPEGs it replaced
   into one album so it is a single gesture, and stops there.
 - **So your library grows before it shrinks.** Copies are added alongside the
@@ -66,10 +83,36 @@ including what it deliberately refuses to do.
 
 macOS 14 or later, and the Swift 6 toolchain (Xcode or the Command Line Tools).
 
-**Tested so far only on macOS 15.7.** It is built against the macOS 26 SDK while
-targeting macOS 14, so newer APIs cannot slip in and crash on older systems — but
-if you are on macOS 14 or macOS 26, you are the first to run it there. Start
-small.
+**Where it has actually been run: macOS 15.7, on a six-core Intel Mac, against a
+library whose originals are all on local disk.** Everything outside that is
+untested rather than unsupported. It is built against the macOS 26 SDK while
+targeting macOS 14, so newer APIs cannot slip in and crash an older system — but
+that is an argument about how it compiles, not evidence about how it runs.
+
+### Beta testers wanted
+
+Three configurations would genuinely help, and a report of any of them is
+welcome as an
+[issue](https://github.com/vastunghia/ApplePhotoLibraryCompressor/issues) —
+including the boring outcome where everything simply worked.
+
+- **Apple Silicon.** Nothing here has ever run on an M-series Mac. Speed is the
+  obvious unknown, but the more interesting one is the quality ladder: the
+  encoder settings HEIC actually distinguishes were measured on Intel's ImageIO
+  and are assumed to be a property of the encoder. If Apple Silicon quantises
+  them differently the search will still return an honest result — every rung it
+  accepts has been measured against your fidelity target — but it may waste
+  probes, or leave saving on the table. The `(N encodes per photo)` figure in the
+  transcode summary is the number to report.
+- **macOS 26.** The risk is not the SDK, it is Photos itself: the scripting
+  dictionary that carries keywords, title and caption, and any change in how
+  PhotoKit reports assets. If keywords stop transferring, the `apply` summary
+  says so explicitly rather than passing over it.
+- **A library set to "Optimise Mac Storage"**, where originals live in iCloud
+  rather than on disk — see [known limitations](#known-limitations) below.
+
+In all three cases: run `aplc scan` first, then a single small month, and read
+the report before going further.
 
 ## Setup
 
@@ -120,9 +163,12 @@ Why the rest are excluded
   hasAdjustments  12  — the photo has edits that would be lost
 ```
 
-**Encoding is the whole cost**, at a few seconds per photo — importing is
-instant. A month is a coffee; a large library is days of machine time, which is
-why the tool is built around working through it a month at a time.
+**Encoding is the whole cost** — importing is instant. Budget **about five
+seconds per photo** for 20-megapixel originals on a six-core Intel Mac; over a
+twelve-month run, everything that was not encoding — scanning, selecting,
+importing, verifying — added up to a rounding error against it. A month is a
+coffee; a large library is days of machine time, which is why the tool is built
+around working through it a month at a time.
 
 ### Or a whole year, unattended
 
@@ -145,8 +191,18 @@ Three things worth knowing before you leave it running:
 - **Interrupting is safe, and so is starting again.** Whether a photo is already
   converted is a question the tool asks your library, not a note it keeps, so a
   second run simply picks up what the first did not finish.
-- **A year is long.** Start with `aplc scan --year 2019` to see how much there is,
-  or `--dry-run` to watch the whole thing decide without writing anything.
+- **A year is hours, not minutes.** Budget from the count, not from the calendar:
+  at roughly **five seconds per photo** a year of 2,000 photographs is about
+  **three hours**, and a heavily shot year can be most of a day. Start with
+  `aplc scan --year 2019` to see how many there are before committing an evening
+  to it, or `--dry-run` to watch the whole thing decide without writing anything.
+
+  That rate is from a six-core Intel i5 with 20-megapixel originals, and it is
+  what a *sustained* run gives rather than a short one — see the note on
+  throttling under [known limitations](#known-limitations). Smaller photographs
+  are proportionally quicker: the cost tracks megapixels closely. Other hardware
+  has not been measured, so scale it by your own first month rather than
+  trusting it.
 
 `scan`, `select` and `calibrate` take a bare `--year` too.
 
@@ -285,9 +341,25 @@ offer that photo again, which is the right answer.
   cores for one photo but cannot be run twice at the same time, so converting
   photos in parallel is worth about 1.5× and raising `--jobs` past the default
   adds very little. The remaining cost is the number of encodes each photo needs
-  — about three, to find its quality — and `--quality` skips that search
+  to find its quality — measured at 2.9 on average across 2,000 photographs, and
+  between 2.8 and 3.1 in every month of them — and `--quality` skips that search
   entirely when time matters more than bytes. See
   [TECHNICAL.md](TECHNICAL.md#several-photos-at-once) for the measurements.
+- **A long run will thermally throttle**, and there is nothing the tool can do
+  about it: encoding is the one thing that keeps every core busy. On a six-core
+  Intel iMac a multi-hour run held 75–80% of maximum clock throughout. Budget
+  from a long run rather than a short one.
+- **It has only ever been run against a library whose originals are all on local
+  disk.** If your library is set to **"Optimise Mac Storage"**, most originals
+  live in iCloud and each one has to come down before it can be re-encoded. That
+  path exists and is metered — `--max-download-gb` caps a run, default 5 GB, and
+  `0` refuses downloads outright — but it has never been exercised at scale, so
+  treat it as the least proven part of the tool. Two things to expect if you try
+  it: the run will be bound by your connection rather than by your CPU, so none
+  of the timings above apply; and downloading an original does not change what
+  the tool then does with it. Convert one small month first and check the
+  `downloaded from iCloud` line in the transcode summary against what you
+  expected.
 - **`verify` re-checks structure and hashes**, and does not re-export originals to
   recompute fidelity from scratch.
 - **Photos only.** In a library that holds much video, transcoding H.264 to HEVC
