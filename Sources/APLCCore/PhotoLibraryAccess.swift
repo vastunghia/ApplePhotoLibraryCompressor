@@ -117,13 +117,42 @@ public enum PhotoLibraryAccess {
         children(of: folder).map { $0.localizedTitle ?? "" }
     }
 
-    /// Resolves `aplc workspace` > `2026-02` > *title* without creating anything.
+    /// The folder holding a month's albums, wherever it is, or nil.
+    ///
+    /// Looks in `aplc workspace` > `2019` > `2019-07` first, then falls back to
+    /// `aplc workspace` > `2019-07` — where every month folder lived before the
+    /// year layer existed, and where those still live, because nothing in this
+    /// tool can move a folder out of its parent. Dragging one into its year in
+    /// Photos.app is therefore a complete migration: the nested lookup starts
+    /// finding it and the fallback simply stops being consulted.
+    ///
+    /// Both layouts are accepted deliberately and indefinitely. There is no
+    /// migration step to write, because there is no supported way to write one.
+    public static func findMonthFolder(
+        named name: String,
+        under root: PHCollectionList
+    ) -> PHCollectionList? {
+        var parent = root
+        for component in WorkspaceLayout.folderPath(forFolderNamed: name) {
+            guard let next = try? findFolder(named: component, in: parent) else {
+                // Not in the nested place. It may predate it.
+                return try? findFolder(named: name, in: root)
+            }
+            parent = next
+        }
+        return parent
+    }
+
+    /// Resolves `aplc workspace` > `2026` > `2026-02` > *title* without creating
+    /// anything.
     public static func findWorkspaceAlbum(
         _ title: String,
         inFolderNamed folder: String
     ) throws -> PHAssetCollection {
         let root = try findFolder(named: WorkspaceLayout.rootFolder, in: nil)
-        let month = try findFolder(named: folder, in: root)
+        guard let month = findMonthFolder(named: folder, under: root) else {
+            throw PhotoLibraryError.folderNotFound(folder)
+        }
         return try findAlbum(titled: title, in: month)
     }
 

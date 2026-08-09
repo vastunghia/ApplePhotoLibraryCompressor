@@ -108,12 +108,79 @@ public enum WorkspaceLayout {
     /// output, a shell, a report — and because `2026-2` beside `2026-11` is worse
     /// to read. It just is not what puts them in order in the sidebar.
     ///
-    /// The consequence, unfixed: a month converted out of sequence lands at the
-    /// **end** of `aplc workspace`, not in its chronological place, and nothing
-    /// here can move it afterwards. Applying `insertionIndex`'s trick to
-    /// `Importer.ensureFolder` would fix it for folders made from then on.
+    /// A month converted out of sequence would therefore land at the end of its
+    /// year rather than in date order, which is what `folderInsertionIndex`
+    /// exists to prevent — for folders created from then on, since an existing
+    /// one cannot be moved.
     public static func monthFolder(_ key: MonthKey) -> String {
         String(format: "%04d-%02d", key.year, key.month)
+    }
+
+    /// "2019". The folder a year's months live in.
+    public static func yearFolder(_ year: Int) -> String {
+        String(format: "%04d", year)
+    }
+
+    /// The folders enclosing a month's albums, outermost first: `"2019-07"` lives
+    /// at `["2019", "2019-07"]`, below `rootFolder`.
+    ///
+    /// The month name stays the identifier every command passes around — it is
+    /// unique on its own, and recovering the year from it is total — so the year
+    /// layer was added without touching a single caller.
+    ///
+    /// `undated` has no year and gets none: inventing one is exactly what
+    /// `undatedFolder` exists to refuse. A name shaped like neither degrades to
+    /// itself rather than to a folder called `"undat"`.
+    public static func folderPath(forFolderNamed name: String) -> [String] {
+        guard let year = yearPrefix(of: name) else { return [name] }
+        return [year, name]
+    }
+
+    /// The `YYYY` of a `YYYY-MM` name, or nil if it is not one.
+    private static func yearPrefix(of name: String) -> String? {
+        let parts = name.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              parts[0].count == 4, parts[0].allSatisfy(\.isNumber),
+              parts[1].count == 2, parts[1].allSatisfy(\.isNumber)
+        else { return nil }
+        return String(parts[0])
+    }
+
+    /// Where a new folder goes among the ones already beside it.
+    ///
+    /// The folder counterpart to `insertionIndex`, and the same "count of those
+    /// that should precede it" rule — but ranked by date rather than by workflow,
+    /// so a month converted late still lands in its chronological place. The
+    /// names are zero-padded, so comparing them as text *is* comparing dates.
+    ///
+    /// Anything not shaped like `YYYY` or `YYYY-MM` — `undated`, a folder the
+    /// user made himself — ranks after all of them and keeps its place, for the
+    /// same reason an album we do not know about does.
+    public static func folderInsertionIndex(for name: String, among existingNames: [String]) -> Int {
+        func isDated(_ name: String) -> Bool {
+            if yearPrefix(of: name) != nil { return true }
+            return name.count == 4 && name.allSatisfy(\.isNumber)
+        }
+        // A dated name precedes an undated one; two dated ones compare as text.
+        func precedes(_ a: String, _ b: String) -> Bool {
+            switch (isDated(a), isDated(b)) {
+            case (true, false): return true
+            case (false, true): return false
+            case (false, false): return false
+            case (true, true): return a < b
+            }
+        }
+        return existingNames.filter { precedes($0, name) }.count
+    }
+
+    /// How a month's album reads in output: `aplc workspace > 2019 > 2019-07 >
+    /// Selected Originals`.
+    ///
+    /// Spelled the way the user would find it in the sidebar, and in one place so
+    /// that a change to the tree cannot leave four hand-built strings behind.
+    public static func displayPath(album: String, inFolderNamed folder: String) -> String {
+        (([rootFolder] + folderPath(forFolderNamed: folder)) + [album])
+            .joined(separator: " > ")
     }
 
     /// Where a copy of an undated photo goes.

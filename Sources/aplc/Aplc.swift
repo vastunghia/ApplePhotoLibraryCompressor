@@ -38,7 +38,7 @@ struct Aplc: AsyncParsableCommand {
               aplc calibrate --year 2019 --month 7   # sample encodes to judge by eye
               aplc convert   --year 2019 --month 7 --dry-run
 
-            Everything lives in "aplc workspace" > "YYYY-MM" in Photos, with the
+            Everything lives in "aplc workspace" > "YYYY" > "YYYY-MM" in Photos, with the
             originals and their copies side by side.
 
             Staging is temporary and leaves nothing on disk. The journal is not:

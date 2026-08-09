@@ -156,7 +156,7 @@ July 2019
   already HEIC                86
   JPEGs already converted     74
   JPEGs still to convert     240
-  added to aplc workspace > 2019-07 > Selected Originals   240
+  added to aplc workspace > 2019 > 2019-07 > Selected Originals   240
 
 Why the rest are excluded
   notAJPEG        86  — original resource is not a JPEG
@@ -256,22 +256,32 @@ The tool builds a folder tree in Photos as it goes, so you can see what is done:
 
 ```
 aplc workspace
-├── 2019-06
-│   ├── Selected Originals            the JPEGs it found to convert
-│   ├── Compressed Originals          the JPEGs those replaced — delete from here
-│   ├── Compressed Copies             the HEICs it created
-│   └── Compressed Copies - to Share  of those, the ones to move back into your
-│                                     Shared Library — see manual step 2
-└── 2019-07
+├── 2019
+│   ├── 2019-06
+│   │   ├── Selected Originals            the JPEGs it found to convert
+│   │   ├── Compressed Originals          the JPEGs those replaced — delete from here
+│   │   ├── Compressed Copies             the HEICs it created
+│   │   └── Compressed Copies - to Share  of those, the ones to move back into
+│   │                                     your Shared Library — see manual step 2
+│   └── 2019-07
+│       └── …
+└── 2020
     └── …
 ```
 
-They are listed in the order you work through them. Photos shows a folder's
-contents in the order they were added and ignores their names, so two things
-follow: months converted before this order existed still show the old one, and
-the months themselves appear in the order you converted them rather than by date.
-Drag either into place if it bothers you — the tool has no way to reorder
-something it already created, on purpose.
+Years, months and albums are each put in the right place as they are made: the
+albums in the order you work through them, the folders by date. That has to
+happen at creation, because Photos shows a folder's contents in the order they
+were added and ignores their names — and this tool cannot move something it has
+already created, deliberately, since the call that reorders is also the call that
+can take things out.
+
+**So anything made before a given version keeps the arrangement it was made
+with.** If you used `aplc` before the year folders existed, your month folders are
+still at the top of `aplc workspace`; the tool goes on finding and using them
+there, indefinitely, and nothing breaks if you leave them. Drag one into a year
+folder whenever you like and it will be found there instead — there is no
+migration step to run, and none is needed.
 
 Copies are filed by the **capture date of the original**, not by when you
 converted them, so a photo you convert next year still lands beside the JPEG it
@@ -415,7 +425,7 @@ offer that photo again, which is the right answer.
 swift test
 ```
 
-169 tests, no photo library and no permissions required: the gate is tested as
+179 tests, no photo library and no permissions required: the gate is tested as
 pure functions, the encoding path against synthetic images, and the generated
 AppleScript is compiled without being executed. `SafetyInvariantTests` is the one
 that matters most — see [TECHNICAL.md](TECHNICAL.md#the-safety-model).

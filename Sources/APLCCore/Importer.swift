@@ -101,13 +101,25 @@ public enum Importer {
             return existing
         }
 
+        // As in `ensureAlbum`, and for the same reason: a folder cannot be moved
+        // once it exists, so its place among its siblings is settled now or never.
+        // Only inside the workspace — the top level of the sidebar is the user's,
+        // and the root folder goes wherever Photos puts it.
+        let position = parent.map {
+            WorkspaceLayout.folderInsertionIndex(
+                for: name, among: PhotoLibraryAccess.childTitles(of: $0)
+            )
+        }
+
         var placeholder: PHObjectPlaceholder?
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHCollectionListChangeRequest.creationRequestForCollectionList(withTitle: name)
             let created = request.placeholderForCreatedCollectionList
             placeholder = created
-            if let parent, let parentRequest = PHCollectionListChangeRequest(for: parent) {
-                parentRequest.addChildCollections([created] as NSArray)
+            if let parent, let position, let parentRequest = PHCollectionListChangeRequest(for: parent) {
+                parentRequest.insertChildCollections(
+                    [created] as NSArray, at: IndexSet(integer: position)
+                )
             }
         }
         guard let id = placeholder?.localIdentifier,
@@ -120,17 +132,35 @@ public enum Importer {
         return created
     }
 
-    /// Ensures `aplc workspace` > `2026-02` > *title*, creating whichever parts
-    /// are missing.
+    /// Ensures `aplc workspace` > `2026` > `2026-02` > *title*, creating whichever
+    /// parts are missing.
     ///
     /// Called only once a command knows it has something to put there: an empty
     /// folder tree in the sidebar would be worse than none.
+    ///
+    /// **The existing folder is looked for before anything is created, and the
+    /// order is the whole correctness of the year layer.** Month folders made
+    /// before that layer sit directly under the root and cannot be moved there
+    /// from here, so creating first would give a month two folders — an empty
+    /// `2019` beside a perfectly good `2019-07` — and split one month's albums
+    /// across both, permanently, since neither can be removed. `findMonthFolder`
+    /// answers for both layouts; only when it finds nothing at all is any folder
+    /// made.
     public static func ensureWorkspaceAlbum(
         _ title: String,
         inFolderNamed folder: String
     ) async throws -> PHAssetCollection {
         let root = try await ensureFolder(named: WorkspaceLayout.rootFolder)
-        let month = try await ensureFolder(named: folder, in: root)
+        let month: PHCollectionList
+        if let existing = PhotoLibraryAccess.findMonthFolder(named: folder, under: root) {
+            month = existing
+        } else {
+            var parent = root
+            for component in WorkspaceLayout.folderPath(forFolderNamed: folder) {
+                parent = try await ensureFolder(named: component, in: parent)
+            }
+            month = parent
+        }
         return try await ensureAlbum(titled: title, in: month)
     }
 

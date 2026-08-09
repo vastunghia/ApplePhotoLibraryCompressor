@@ -136,7 +136,8 @@ struct SourceAlbumOptions: ParsableArguments {
     var displayName: String {
         if let album { return "\"\(album)\"" }
         if let key = monthKey {
-            return "\(WorkspaceLayout.rootFolder) > \(WorkspaceLayout.monthFolder(key)) > \(WorkspaceLayout.originalsAlbum)"
+            return WorkspaceLayout.displayPath(album: WorkspaceLayout.originalsAlbum,
+                                               inFolderNamed: WorkspaceLayout.monthFolder(key))
         }
         if isWholeYear, let year { return "\(year), all twelve months" }
         return "the selected album"

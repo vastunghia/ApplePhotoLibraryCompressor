@@ -431,7 +431,11 @@ transcoding, which is the same conclusion reached at one month, now at a hundred
 times the size. Per-month failure isolation was never needed, and remains the
 kind of thing that has to exist before the run that needs it.
 
-## The order of the albums in a month folder
+## The shape of the workspace, and the order of what is in it
+
+The tree is `aplc workspace` > `2019` > `2019-07` > four albums. The year level
+exists because the month level does not scale: a whole library is two hundred and
+fifty sibling folders without it.
 
 The four albums appear in the order you work through them — `Selected Originals`,
 `Compressed Originals`, `Compressed Copies`, `Compressed Copies - to Share` —
@@ -442,7 +446,6 @@ takes no notice of their names.** Measured on 2026-08-09 against a real month wi
 all four albums present, and confirmed one level up for the month folders
 themselves. It was worth measuring because the alternative is not exotic: had
 Photos sorted by title, none of the machinery below would do anything visible.
-
 
 Since Photos puts a newly created album at the end, the order can only be set as
 the album is born: `Importer` works out the position from the folder's current
@@ -457,12 +460,31 @@ inserted above it rather than shuffling anything you arranged. And the rule is a
 pure function of album titles, so it is tested without a photo library like the
 rest of the core.
 
-The month **folders** obey the same rule, and one thing follows that the tool does
-not yet do anything about: they appear in the order you converted them, not in
-date order. Convert 2020 after 2026 and that is how the sidebar reads. Their names
-are zero-padded (`2026-02`) so a text sort of them is chronological, which is
-useful wherever else the names are read but is not what orders the sidebar — and
-an existing folder cannot be moved, for the reason above.
+The **folders** obey the same rule and get the same treatment, ranked by date
+instead of by workflow: a month converted out of sequence is inserted in its
+chronological place rather than appended, and so is a year. Their names are
+zero-padded (`2026-02`) so that comparing them as text *is* comparing dates —
+useful wherever the names are read, but not what orders the sidebar.
+
+### Two layouts, accepted on purpose
+
+A folder cannot be moved out of its parent — `PHCollection` has exactly one, and
+the calls that would change it are forbidden. So month folders created before the
+year level existed are **still directly under `aplc workspace`**, and no migration
+the tool could run would fix that.
+
+Rather than pretend otherwise, lookup accepts both: `aplc workspace > 2019 >
+2019-07` first, then `aplc workspace > 2019-07`. Two consequences worth stating:
+
+- **The search happens before anything is created.** Creating first would give one
+  month two folders — an empty `2019` beside a working `2019-07` — and split its
+  albums across both, permanently, since neither can be removed afterwards.
+- **Dragging a folder into its year in Photos.app is a complete migration.** The
+  nested lookup starts finding it, the fallback stops being consulted, and nothing
+  had to be renamed, because the month keeps its full `YYYY-MM` name inside the
+  year folder for exactly this reason.
+
+Doing nothing is equally valid, and this is not a deprecation on a timer.
 
 ## How the tool knows what is already converted
 
@@ -588,7 +610,7 @@ Sources/APLCCore/          testable core, no CLI
   PhotosScripting.swift    Apple Events for keywords, title and caption
   Importer.swift           the only code that writes to the library
 Sources/aplc/              CLI subcommands
-Tests/APLCCoreTests/       169 tests, no photo library required
+Tests/APLCCoreTests/       179 tests, no photo library required
 ```
 
 `swift test` runs without a photo library: the gate is tested as pure functions,

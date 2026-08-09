@@ -14,14 +14,14 @@ struct Apply: AsyncParsableCommand {
             Photos.app, once you are satisfied with the copies.
 
             Each copy is filed by the capture date of its original, in
-            "aplc workspace" > "YYYY-MM" > "Compressed Copies", so an album that
-            spans two months produces two destinations. The JPEGs it replaced go
-            beside them in "Compressed Originals" — the album to delete from once
-            you are satisfied. Copies whose original was in an iCloud Shared
-            Photo Library are additionally gathered in
-            "Compressed Copies - to Share", since a copy is always created
-            personal and moving it back is the other manual step.
-            --dest-album overrides all of that with a single flat album.
+            "aplc workspace" > "YYYY" > "YYYY-MM" > "Compressed Copies", so an
+            album that spans two months produces two destinations. The JPEGs it
+            replaced go beside them in "Compressed Originals" — the album to
+            delete from once you are satisfied. Copies whose original was in an
+            iCloud Shared Photo Library are additionally gathered in "Compressed
+            Copies - to Share", since a copy is always created personal and
+            moving it back is the other manual step. --dest-album overrides all
+            of that with a single flat album.
 
             Given --year without --month it matches staged files against all
             twelve months' albums, which is what makes it the step `convert` can
@@ -72,7 +72,7 @@ struct Apply: AsyncParsableCommand {
     /// Where the copies will go, spelled as the user would find it in Photos.
     private var destinationDescription: String {
         if let destAlbum { return "\"\(destAlbum)\"" }
-        return "\(WorkspaceLayout.rootFolder) > (capture month) > \(WorkspaceLayout.copiesAlbum)"
+        return "\(WorkspaceLayout.rootFolder) > (capture year) > (capture month) > \(WorkspaceLayout.copiesAlbum)"
     }
 
     func run() async throws {
@@ -547,7 +547,8 @@ struct Apply: AsyncParsableCommand {
             reviewTarget = destinationDescription
         } else {
             reviewTarget = perDestination.keys.sorted()
-                .map { "\(WorkspaceLayout.rootFolder) > \($0) > \(WorkspaceLayout.copiesAlbum)" }
+                .map { WorkspaceLayout.displayPath(album: WorkspaceLayout.copiesAlbum,
+                                                   inFolderNamed: $0) }
                 .joined(separator: ", ")
         }
 

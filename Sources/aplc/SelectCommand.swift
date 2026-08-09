@@ -20,10 +20,10 @@ struct Select: AsyncParsableCommand {
             itself, so the answer survives deleting a staging folder or moving the
             copies into your Shared Library.
 
-            The album goes in "aplc workspace" > "YYYY-MM" > "Selected Originals",
-            so each month's work sits together and the rest of the pipeline can
-            find it from --year and --month alone. --album overrides that with a
-            flat album of your own naming.
+            The album goes in "aplc workspace" > "YYYY" > "YYYY-MM" >
+            "Selected Originals", so each month's work sits together and the rest
+            of the pipeline can find it from --year and --month alone. --album
+            overrides that with a flat album of your own naming.
 
             Leave --month out and it does the whole year, one month's album at a
             time, and prints a total for the year at the end.
@@ -60,8 +60,8 @@ struct Select: AsyncParsableCommand {
     /// Where a month's photos will go, spelled as the user would find it in Photos.
     private func destinationName(for key: MonthKey) -> String {
         if let album { return "\"\(album)\"" }
-        let folder = WorkspaceLayout.monthFolder(key)
-        return "\(WorkspaceLayout.rootFolder) > \(folder) > \(WorkspaceLayout.originalsAlbum)"
+        return WorkspaceLayout.displayPath(album: WorkspaceLayout.originalsAlbum,
+                                           inFolderNamed: WorkspaceLayout.monthFolder(key))
     }
 
     /// The months to fill: the one asked for, or all twelve of the year.

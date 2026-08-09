@@ -109,9 +109,107 @@ final class WorkspaceLayoutTests: XCTestCase {
         }
     }
 
+    // MARK: - The year layer
+
+    func testAMonthFolderLivesInsideItsYear() {
+        XCTAssertEqual(WorkspaceLayout.folderPath(forFolderNamed: "2019-07"),
+                       ["2019", "2019-07"])
+        XCTAssertEqual(WorkspaceLayout.folderPath(forFolderNamed: "1990-01"),
+                       ["1990", "1990-01"])
+    }
+
+    /// A photo with no capture date has no year either, and inventing one is what
+    /// `undatedFolder` exists to refuse.
+    func testTheUndatedFolderGetsNoYear() {
+        XCTAssertEqual(
+            WorkspaceLayout.folderPath(forFolderNamed: WorkspaceLayout.undatedFolder),
+            [WorkspaceLayout.undatedFolder]
+        )
+    }
+
+    /// A name shaped like neither must degrade to itself, not to a folder called
+    /// "undat" or "2019".
+    func testANameThatIsNotAMonthIsItsOwnPath() {
+        for name in ["undated", "2019", "201-07", "2019-7", "2019-07-01", "notes", ""] {
+            XCTAssertEqual(WorkspaceLayout.folderPath(forFolderNamed: name), [name],
+                           "\(name) should not have been split")
+        }
+    }
+
+    func testDisplayPathSpellsTheWholeTree() {
+        XCTAssertEqual(
+            WorkspaceLayout.displayPath(album: WorkspaceLayout.copiesAlbum,
+                                        inFolderNamed: "2019-07"),
+            "aplc workspace > 2019 > 2019-07 > Compressed Copies"
+        )
+        XCTAssertEqual(
+            WorkspaceLayout.displayPath(album: WorkspaceLayout.originalsAlbum,
+                                        inFolderNamed: WorkspaceLayout.undatedFolder),
+            "aplc workspace > undated > Selected Originals"
+        )
+    }
+
+    // MARK: - Where a new folder goes
+
+    func testTheFirstFolderGoesAtTheStart() {
+        XCTAssertEqual(WorkspaceLayout.folderInsertionIndex(for: "2019", among: []), 0)
+    }
+
+    /// The case the whole thing is for: a month converted after a later one still
+    /// lands in date order, because Photos would otherwise just append it.
+    func testAMonthConvertedLateStillLandsInDateOrder() {
+        let existing = ["2021-03", "2021-07"]
+        XCTAssertEqual(WorkspaceLayout.folderInsertionIndex(for: "2021-01", among: existing), 0)
+        XCTAssertEqual(WorkspaceLayout.folderInsertionIndex(for: "2021-05", among: existing), 1)
+        XCTAssertEqual(WorkspaceLayout.folderInsertionIndex(for: "2021-12", among: existing), 2)
+    }
+
+    func testYearsSortAmongYears() {
+        let existing = ["1990", "2019", "2026"]
+        XCTAssertEqual(WorkspaceLayout.folderInsertionIndex(for: "2020", among: existing), 2)
+        XCTAssertEqual(WorkspaceLayout.folderInsertionIndex(for: "1989", among: existing), 0)
+    }
+
+    /// Building a year the way `apply` would, in whatever order the months were
+    /// converted, must give a chronological folder.
+    func testInsertingTwelveMonthsInAScrambledOrderGivesAChronologicalYear() {
+        let scrambled = [7, 1, 12, 3, 11, 2, 9, 4, 6, 10, 5, 8]
+            .map { WorkspaceLayout.monthFolder(MonthKey(year: 2021, month: $0)) }
+        var folder: [String] = []
+        for name in scrambled {
+            folder.insert(name, at: WorkspaceLayout.folderInsertionIndex(for: name, among: folder))
+        }
+        XCTAssertEqual(folder, MonthKey.months(inYear: 2021).map(WorkspaceLayout.monthFolder))
+    }
+
+    /// `undated` sorts below the years, and a folder the user made is not ours to
+    /// move: both rank after anything dated and keep their place.
+    func testUndatedAndUserFoldersStayBelowTheYears() {
+        let existing = ["2019", WorkspaceLayout.undatedFolder, "Sergio's folder"]
+        XCTAssertEqual(WorkspaceLayout.folderInsertionIndex(for: "2020", among: existing), 1)
+
+        var folder = existing
+        let name = "2020"
+        folder.insert(name, at: WorkspaceLayout.folderInsertionIndex(for: name, among: existing))
+        XCTAssertEqual(folder, ["2019", "2020", WorkspaceLayout.undatedFolder, "Sergio's folder"])
+    }
+
+    func testTheFolderInsertionIndexIsAlwaysAValidInsertionPoint() {
+        let candidates = ["1990", "2019", "2019-07", "2026-01",
+                          WorkspaceLayout.undatedFolder, "Sergio's folder"]
+        for name in candidates {
+            for count in 0...candidates.count {
+                let existing = Array(candidates.prefix(count))
+                let index = WorkspaceLayout.folderInsertionIndex(for: name, among: existing)
+                XCTAssertTrue((0...existing.count).contains(index),
+                              "\(index) is not an insertion point for \(existing)")
+            }
+        }
+    }
+
     /// The padding is what makes a text sort of these names chronological rather
-    /// than putting October before February. Whether Photos sorts month folders
-    /// that way is a separate, unmeasured question — see `monthFolder`.
+    /// than putting October before February. It is *not* what orders them in
+    /// Photos, which ignores the names entirely — see `monthFolder`.
     func testMonthFolderIsZeroPaddedAndSortsChronologically() {
         XCTAssertEqual(WorkspaceLayout.monthFolder(MonthKey(year: 2026, month: 2)), "2026-02")
         XCTAssertEqual(WorkspaceLayout.monthFolder(MonthKey(year: 2026, month: 12)), "2026-12")
