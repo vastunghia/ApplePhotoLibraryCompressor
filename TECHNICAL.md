@@ -48,7 +48,9 @@ copies and leaves deletion to you, in Photos.app.
   Taking a photo out of an album needs `removeAssets`, which is banned — so the
   tool can fill an album and never unfill it. The alternative was to allow a call
   that could equally strip an album you built by hand. The same trade applies one
-  level up to the workspace folders.
+  level up to the workspace folders, and to their *order*: a new album is
+  inserted at the position it should occupy, because the call that would move one
+  afterwards is banned too. Folders built before an order existed keep theirs.
 - **Every conversion must pass the gate** (below) or it is skipped with a
   recorded reason. Nothing is ever converted approximately.
 - **Two commands can create assets, and both refuse to start if `verify` reports
@@ -141,6 +143,24 @@ so the choice is enforced rather than merely intended.
 > deleting a shared original removes it **for everyone it was shared with**, while
 > your converted copy remains personal. Move the copies into the Shared Library in
 > Photos.app *before* deleting anything.
+
+Membership can at least be *read*, and `apply` reads it so the manual step becomes
+a select-all: the copies whose original was shared go into `Compressed Copies - to
+Share`. There is no public API for that either — the SDK's Photos headers contain
+no occurrence of `Scope`, and the scripting dictionary none — so this uses one
+non-public property, `PHAsset.participatesInLibraryScope`, reached through the
+Objective-C runtime and behind a `responds(to:)` check. It is a **read**: a test
+asserts the file containing it names no change request of any kind, and the three
+destructive scope calls above stay banned. If a future macOS withdraws the
+property the answer becomes "unknown", and an unknown copy is left out of the
+album and counted in the report rather than guessed into it.
+
+The alternatives were weighed and rejected. Putting *every* copy in the album
+needs no private API but invites moving personal photos into a shared library,
+which publishes them to other people. Reading `ZASSET.ZLIBRARYSCOPE` from the
+library's SQLite store is not private API, but needs a bundle path PhotoKit does
+not expose, Full Disk Access, and a read of a write-ahead log Photos holds open —
+more fragile, not less.
 
 **Edit history** and the original **date added** are likewise not transferable,
 and photos with edits are refused by the gate for exactly that reason.
@@ -411,6 +431,39 @@ transcoding, which is the same conclusion reached at one month, now at a hundred
 times the size. Per-month failure isolation was never needed, and remains the
 kind of thing that has to exist before the run that needs it.
 
+## The order of the albums in a month folder
+
+The four albums appear in the order you work through them — `Selected Originals`,
+`Compressed Originals`, `Compressed Copies`, `Compressed Copies - to Share` —
+rather than alphabetically, which would put them in an order matching nothing.
+
+**Photos shows a folder's children in the order the collection holds them, and
+takes no notice of their names.** Measured on 2026-08-09 against a real month with
+all four albums present, and confirmed one level up for the month folders
+themselves. It was worth measuring because the alternative is not exotic: had
+Photos sorted by title, none of the machinery below would do anything visible.
+
+
+Since Photos puts a newly created album at the end, the order can only be set as
+the album is born: `Importer` works out the position from the folder's current
+contents and **inserts** rather than appends. That is also the only chance there
+is, because moving an album afterwards needs a call on the forbidden list — so a
+month folder created before this order existed keeps the order it was built in,
+and is rearranged by dragging in Photos.app or not at all.
+
+Two smaller properties fall out of the same rule. An album you made yourself is
+not in the list, so it ranks last and keeps its place: a workspace album is
+inserted above it rather than shuffling anything you arranged. And the rule is a
+pure function of album titles, so it is tested without a photo library like the
+rest of the core.
+
+The month **folders** obey the same rule, and one thing follows that the tool does
+not yet do anything about: they appear in the order you converted them, not in
+date order. Convert 2020 after 2026 and that is how the sidebar reads. Their names
+are zero-padded (`2026-02`) so a text sort of them is chronological, which is
+useful wherever else the names are read but is not what orders the sidebar — and
+an existing folder cannot be moved, for the reason above.
+
 ## How the tool knows what is already converted
 
 A library too large to convert in one go has to be worked through in pieces, and
@@ -526,7 +579,8 @@ Sources/APLCCore/          testable core, no CLI
   QualitySearch.swift      the encoder's real quality rungs, and the search
   CandidateSelection.swift what a month still has left to convert
   DuplicateCheck.swift     whether a staged file is already in the library
-  WorkspaceLayout.swift    the folder and album names, in one place
+  WorkspaceLayout.swift    the folder and album names and their order, in one place
+  LibraryScope.swift       reads shared-library membership, and only reads it
   EligibilityGate.swift    the eight checks, as pure functions
   Ledger.swift             append-only journal, SHA-256 digests
   StagingArea.swift        the temporary directory and its lifetime
@@ -534,7 +588,7 @@ Sources/APLCCore/          testable core, no CLI
   PhotosScripting.swift    Apple Events for keywords, title and caption
   Importer.swift           the only code that writes to the library
 Sources/aplc/              CLI subcommands
-Tests/APLCCoreTests/       132 tests, no photo library required
+Tests/APLCCoreTests/       169 tests, no photo library required
 ```
 
 `swift test` runs without a photo library: the gate is tested as pure functions,

@@ -108,6 +108,15 @@ public enum PhotoLibraryAccess {
         return first
     }
 
+    /// The titles of a folder's children, in the order Photos holds them.
+    ///
+    /// Order is the point: it is what `WorkspaceLayout.insertionIndex` needs to
+    /// work out where a new album belongs, since the order can only be set as the
+    /// album is created.
+    public static func childTitles(of folder: PHCollectionList) -> [String] {
+        children(of: folder).map { $0.localizedTitle ?? "" }
+    }
+
     /// Resolves `aplc workspace` > `2026-02` > *title* without creating anything.
     public static func findWorkspaceAlbum(
         _ title: String,
@@ -164,6 +173,15 @@ public enum PhotoLibraryAccess {
         PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
             .enumerateObjects { asset, _, _ in found.insert(asset.localIdentifier) }
         return found
+    }
+
+    /// The assets these identifiers name, skipping any that no longer exist.
+    ///
+    /// One fetch rather than one each, as above. Used to turn the identifiers a
+    /// creation returned back into assets that can be filed into an album.
+    public static func assets(withIdentifiers identifiers: [String]) -> [PHAsset] {
+        guard !identifiers.isEmpty else { return [] }
+        return materialise(PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil))
     }
 
     private static func materialise(_ result: PHFetchResult<PHAsset>) -> [PHAsset] {

@@ -49,6 +49,15 @@ public enum Importer {
             return existing
         }
 
+        // Worked out before the change block, which cannot fetch. `apply` is
+        // sequential and is the only writer, so nothing can slip into the folder
+        // in between.
+        let position = folder.map {
+            WorkspaceLayout.insertionIndex(
+                for: title, among: PhotoLibraryAccess.childTitles(of: $0)
+            )
+        }
+
         var placeholder: PHObjectPlaceholder?
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: title)
@@ -57,8 +66,15 @@ public enum Importer {
             // Same transaction as the creation, deliberately: an album exists at
             // the top level until it is filed, so doing this in a second call
             // leaves one stranded there if the run is interrupted between them.
-            if let folder, let parent = PHCollectionListChangeRequest(for: folder) {
-                parent.addChildCollections([created] as NSArray)
+            //
+            // Inserted rather than appended, because Photos keeps a folder's
+            // children in the order they arrived and this tool cannot reorder
+            // them afterwards: the call that would is forbidden. Placing the
+            // album correctly as it is born is the only chance there is.
+            if let folder, let position, let parent = PHCollectionListChangeRequest(for: folder) {
+                parent.insertChildCollections(
+                    [created] as NSArray, at: IndexSet(integer: position)
+                )
             }
         }
         guard let id = placeholder?.localIdentifier,

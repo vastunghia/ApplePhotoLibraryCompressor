@@ -17,8 +17,11 @@ struct Apply: AsyncParsableCommand {
             "aplc workspace" > "YYYY-MM" > "Compressed Copies", so an album that
             spans two months produces two destinations. The JPEGs it replaced go
             beside them in "Compressed Originals" — the album to delete from once
-            you are satisfied. --dest-album overrides all of that with a single
-            flat album.
+            you are satisfied. Copies whose original was in an iCloud Shared
+            Photo Library are additionally gathered in
+            "Compressed Copies - to Share", since a copy is always created
+            personal and moving it back is the other manual step.
+            --dest-album overrides all of that with a single flat album.
 
             Given --year without --month it matches staged files against all
             twelve months' albums, which is what makes it the step `convert` can
@@ -240,6 +243,13 @@ struct Apply: AsyncParsableCommand {
         var perDestination: [String: Int] = [:]
         /// Month folder -> the JPEGs whose copy this run created.
         var convertedOriginals: [String: [PHAsset]] = [:]
+        /// Month folder -> the new copies whose original was in a shared library.
+        ///
+        /// Identifiers rather than assets: the copy has just been created, so the
+        /// only handle on it is what the creation returned.
+        var sharedCopies: [String: [String]] = [:]
+        /// Copies whose original's membership could not be read at all.
+        var scopeUnknown = 0
         // Without a terminal there is nobody to answer, so a question would be a
         // hang. `convert` inherits this: run it from a script and a differing
         // copy is skipped and reported, not waited on.
@@ -429,6 +439,15 @@ struct Apply: AsyncParsableCommand {
                 // one per photo, and only a copy that actually got created earns
                 // its original a place in the deletable album.
                 convertedOriginals[folder, default: []].append(sourceAsset)
+                // Asked of the original while it is still in hand, since the
+                // copy cannot answer: it is created in the personal library
+                // whatever its original was. A property read on an asset already
+                // fetched — no Apple Events, nothing to download.
+                switch LibraryScope.isShared(sourceAsset) {
+                case true: sharedCopies[folder, default: []].append(identifier)
+                case false: break
+                case nil: scopeUnknown += 1
+                }
                 if let text = entry.sourceTextMetadata, !text.isEmpty {
                     pendingText[identifier] = text
                     createdFilenames[identifier] = entry.originalFilename
@@ -477,6 +496,24 @@ struct Apply: AsyncParsableCommand {
             }
         }
 
+        // The copies that have to be put back into the shared library by hand,
+        // gathered for the same reason and skipped in --dest-album mode for the
+        // same one. Nothing here decides anything: it is a list to act on.
+        var toReshare = 0
+        if destAlbum == nil {
+            for (folder, identifiers) in sharedCopies.sorted(by: { $0.key < $1.key }) {
+                let copies = PhotoLibraryAccess.assets(withIdentifiers: identifiers)
+                guard !copies.isEmpty else { continue }
+                let album = try await Importer.ensureWorkspaceAlbum(
+                    WorkspaceLayout.sharedCopiesAlbum, inFolderNamed: folder
+                )
+                let existing = PhotoLibraryAccess.identifiers(in: album)
+                let toAdd = copies.filter { !existing.contains($0.localIdentifier) }
+                try await Importer.add(toAdd, to: album)
+                toReshare += toAdd.count
+            }
+        }
+
         let textReport = await transferTextMetadata(pendingText, ledger: ledger,
                                                     filenames: createdFilenames)
 
@@ -491,6 +528,7 @@ struct Apply: AsyncParsableCommand {
         }
         if destAlbum == nil {
             rows.append(("originals now replaceable", "\(markedForDeletion)"))
+            rows.append(("copies to re-share", "\(toReshare)"))
         }
         rows.append(("keywords/title/caption transferred", textReport.summary))
         print(Format.table(rows))
@@ -530,13 +568,14 @@ struct Apply: AsyncParsableCommand {
             transferable this way.
 
             Also not inherited: iCloud Shared Photo Library membership. Copies are
-            created in your personal library even when the original was shared. Move
-            them in Photos.app if you need them shared — and note that deleting a
-            shared original removes it for the other participants too, while your
-            converted copy stays personal.
+            created in your personal library even when the original was shared — no
+            supported API can put one in a shared scope. Note that deleting a shared
+            original removes it for the other participants too, while your converted
+            copy stays personal until you move it.
 
             Review \(reviewTarget) in Photos.app.
             """)
+
 
         if destAlbum == nil && markedForDeletion > 0 {
             print("""
@@ -549,6 +588,27 @@ struct Apply: AsyncParsableCommand {
                 Inside an album, use Cmd+Backspace. Plain Backspace only takes a photo \
                 out of the album: the file stays, nothing reaches Recently Deleted, and \
                 nothing tells you it did not happen.
+                """)
+        }
+
+        if destAlbum == nil && toReshare > 0 {
+            print("""
+
+                The other manual step: \(toReshare) of the new copies replaced an \
+                original that was in a shared library, and they are gathered in \
+                "\(WorkspaceLayout.sharedCopiesAlbum)". Select them all there and use \
+                Move to Shared Library — that is the one thing the copy could not \
+                inherit for itself.
+                """)
+        }
+
+        if destAlbum == nil && scopeUnknown > 0 {
+            print("""
+
+                Shared library membership could not be read for \(scopeUnknown) of the \
+                originals, so their copies were left out of \
+                "\(WorkspaceLayout.sharedCopiesAlbum)" rather than guessed into it. \
+                Check those by hand if you share this month.
                 """)
         }
     }

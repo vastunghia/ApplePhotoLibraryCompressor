@@ -83,6 +83,33 @@ final class SafetyInvariantTests: XCTestCase {
         }
     }
 
+    /// `LibraryScope` is the one place in `Sources/` that reads a property the
+    /// SDK does not declare, and the case for it rests entirely on the read being
+    /// a read. The three destructive scope calls are already banned everywhere by
+    /// the test above; this one is narrower and blunter — nothing in that file may
+    /// ask PhotoKit to change anything at all, whatever it is named.
+    func testTheLibraryScopeReadCannotWrite() throws {
+        let url = sourceRoot
+            .appendingPathComponent("APLCCore")
+            .appendingPathComponent("LibraryScope.swift")
+        let text = try String(contentsOf: url, encoding: .utf8)
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//") || trimmed.hasPrefix("*") || trimmed.hasPrefix("/*") {
+                continue
+            }
+            for symbol in ["ChangeRequest", "performChanges", "Request("] where line.contains(symbol) {
+                XCTFail("""
+                    LibraryScope.swift names \(symbol). Reading an asset's shared \
+                    library membership through a non-public property is only \
+                    defensible because it cannot write; that stops being true here.
+                    Offending line: \(trimmed)
+                    """)
+            }
+        }
+    }
+
     /// Word-boundary matched so "deleted" inside a string would not trip it, and
     /// so `description` does not read as a hit for some substring.
     private func words(of script: String) -> [String] {

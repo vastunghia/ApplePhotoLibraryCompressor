@@ -219,8 +219,9 @@ The space does not come back until you do these. Do them **in this order**.
 
 2. **Re-do the iCloud Shared Photo Library membership by hand.** If the originals
    were in your Shared Library, the copies are *not*: they are always created in
-   your personal library, and no supported API can change that. Select them in
-   Photos.app and move them across.
+   your personal library, and no supported API can change that. The ones this
+   applies to are gathered in `aplc workspace > YYYY-MM > Compressed Copies - to
+   Share`, so it is a select-all and **Move to Shared Library**.
 
    This comes before step 3 on purpose. Deleting a shared original removes it
    **for everyone it was shared with** — so if you delete first, the other
@@ -256,17 +257,27 @@ The tool builds a folder tree in Photos as it goes, so you can see what is done:
 ```
 aplc workspace
 ├── 2019-06
-│   ├── Selected Originals     the JPEGs it found to convert
-│   ├── Compressed Copies      the HEICs it created
-│   └── Compressed Originals   the JPEGs those replaced — delete from here
+│   ├── Selected Originals            the JPEGs it found to convert
+│   ├── Compressed Originals          the JPEGs those replaced — delete from here
+│   ├── Compressed Copies             the HEICs it created
+│   └── Compressed Copies - to Share  of those, the ones to move back into your
+│                                     Shared Library — see manual step 2
 └── 2019-07
     └── …
 ```
 
+They are listed in the order you work through them. Photos shows a folder's
+contents in the order they were added and ignores their names, so two things
+follow: months converted before this order existed still show the old one, and
+the months themselves appear in the order you converted them rather than by date.
+Drag either into place if it bothers you — the tool has no way to reorder
+something it already created, on purpose.
+
 Copies are filed by the **capture date of the original**, not by when you
 converted them, so a photo you convert next year still lands beside the JPEG it
 came from. Photos with no capture date at all go to `aplc workspace > undated`.
-Nothing is created before there is something to put in it.
+Nothing is created before there is something to put in it — a month where nothing
+was shared gets no `Compressed Copies - to Share` album at all.
 
 **Why `Selected Originals` and `Compressed Originals` can differ.** They usually
 hold the same photos, but not always, and the difference is deliberate:
@@ -280,6 +291,12 @@ That narrowness is the point: `Compressed Originals` is the album that invites
 deletion, and having *found* a replacement is not the same standard as having
 *made* one. To see the wider picture, use the "JPEGs already converted" count
 that every run prints.
+
+`Compressed Copies - to Share` is narrow in the same way, and in one more: a copy
+goes in only if the tool could actually read that its original was in a Shared
+Library. When it cannot, the copy is left out and the run says how many — leaving
+a photo for you to share by hand is a smaller mistake than publishing a personal
+one to other people.
 
 One caveat: **album membership is one-way.** Putting a photo into an album needs
 no destructive API; taking it out does, and this tool contains none. So a wrong
@@ -398,7 +415,7 @@ offer that photo again, which is the right answer.
 swift test
 ```
 
-132 tests, no photo library and no permissions required: the gate is tested as
+169 tests, no photo library and no permissions required: the gate is tested as
 pure functions, the encoding path against synthetic images, and the generated
 AppleScript is compiled without being executed. `SafetyInvariantTests` is the one
 that matters most — see [TECHNICAL.md](TECHNICAL.md#the-safety-model).

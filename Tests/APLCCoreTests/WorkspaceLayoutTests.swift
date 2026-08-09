@@ -16,8 +16,102 @@ final class WorkspaceLayoutTests: XCTestCase {
         return formatter.date(from: iso)!
     }
 
-    /// Photos sorts folders as text, so the padding is what keeps a year in
-    /// chronological order rather than putting October before February.
+    /// The order is the workflow's, not the alphabet's, and the alphabet would
+    /// give a different one — which is the whole reason the insertion index
+    /// exists. Pinned so a rename cannot quietly drop an album out of the order.
+    func testAlbumOrderIsTheWorkflowOrderAndHoldsEveryWorkspaceAlbum() {
+        XCTAssertEqual(WorkspaceLayout.albumOrder, [
+            "Selected Originals",
+            "Compressed Originals",
+            "Compressed Copies",
+            "Compressed Copies - to Share",
+        ])
+        XCTAssertNotEqual(WorkspaceLayout.albumOrder, WorkspaceLayout.albumOrder.sorted())
+    }
+
+    func testFirstAlbumInAnEmptyFolderGoesAtTheStart() {
+        XCTAssertEqual(
+            WorkspaceLayout.insertionIndex(for: WorkspaceLayout.originalsAlbum, among: []), 0
+        )
+    }
+
+    /// The album `apply` creates second must land *above* the one `select` made
+    /// first, which is the case appending gets wrong.
+    func testAnAlbumIsPlacedAheadOfOnesThatComeAfterItInTheOrder() {
+        let existing = [WorkspaceLayout.originalsAlbum, WorkspaceLayout.copiesAlbum]
+        XCTAssertEqual(
+            WorkspaceLayout.insertionIndex(for: WorkspaceLayout.convertedOriginalsAlbum,
+                                           among: existing),
+            1
+        )
+    }
+
+    func testTheSharedCopiesAlbumGoesLastAmongTheWorkspaceAlbums() {
+        let existing = [
+            WorkspaceLayout.originalsAlbum,
+            WorkspaceLayout.convertedOriginalsAlbum,
+            WorkspaceLayout.copiesAlbum,
+        ]
+        XCTAssertEqual(
+            WorkspaceLayout.insertionIndex(for: WorkspaceLayout.sharedCopiesAlbum, among: existing),
+            3
+        )
+    }
+
+    /// Built in the order the commands actually create them, the four end up in
+    /// `albumOrder` — which is the property the whole mechanism is for.
+    func testInsertingInCreationOrderReproducesTheIntendedOrder() {
+        // `select` first, then `apply`: copies, then originals, then to-share.
+        let creationOrder = [
+            WorkspaceLayout.originalsAlbum,
+            WorkspaceLayout.copiesAlbum,
+            WorkspaceLayout.convertedOriginalsAlbum,
+            WorkspaceLayout.sharedCopiesAlbum,
+        ]
+        var folder: [String] = []
+        for title in creationOrder {
+            folder.insert(title, at: WorkspaceLayout.insertionIndex(for: title, among: folder))
+        }
+        XCTAssertEqual(folder, WorkspaceLayout.albumOrder)
+    }
+
+    /// An album the user made himself is not ours to move. A workspace album
+    /// goes above it; his keeps its place.
+    func testAnAlbumTheUserMadeIsNotReordered() {
+        let existing = [WorkspaceLayout.originalsAlbum, "Sergio's picks"]
+        let index = WorkspaceLayout.insertionIndex(for: WorkspaceLayout.copiesAlbum,
+                                                   among: existing)
+        XCTAssertEqual(index, 1)
+
+        var folder = existing
+        folder.insert(WorkspaceLayout.copiesAlbum, at: index)
+        XCTAssertEqual(folder.last, "Sergio's picks")
+    }
+
+    /// `ensureAlbum` returns early when the album is already there, so this never
+    /// runs in practice — but if it ever did, it must not move the album.
+    func testAnAlbumAlreadyPresentWouldBePlacedWhereItAlreadyIs() {
+        let folder = WorkspaceLayout.albumOrder
+        for (position, title) in folder.enumerated() {
+            XCTAssertEqual(WorkspaceLayout.insertionIndex(for: title, among: folder), position)
+        }
+    }
+
+    func testTheInsertionIndexIsAlwaysAValidInsertionPoint() {
+        let candidates = WorkspaceLayout.albumOrder + ["Sergio's picks"]
+        for title in candidates {
+            for count in 0...candidates.count {
+                let existing = Array(candidates.prefix(count))
+                let index = WorkspaceLayout.insertionIndex(for: title, among: existing)
+                XCTAssertTrue((0...existing.count).contains(index),
+                              "\(index) is not an insertion point for \(existing)")
+            }
+        }
+    }
+
+    /// The padding is what makes a text sort of these names chronological rather
+    /// than putting October before February. Whether Photos sorts month folders
+    /// that way is a separate, unmeasured question — see `monthFolder`.
     func testMonthFolderIsZeroPaddedAndSortsChronologically() {
         XCTAssertEqual(WorkspaceLayout.monthFolder(MonthKey(year: 2026, month: 2)), "2026-02")
         XCTAssertEqual(WorkspaceLayout.monthFolder(MonthKey(year: 2026, month: 12)), "2026-12")
