@@ -163,6 +163,24 @@ Why the rest are excluded
   hasAdjustments  12  — the photo has edits that would be lost
 ```
 
+Then it converts, one line per photo, each carrying which month it belongs to,
+how far through that month it is, and roughly how much longer the month has to
+run:
+
+```
+  [ July 2019  123/198  62%  ~6m left ]  IMG_4471.jpg  8.2 MB -> 1.9 MB  (77% saved, q=0.88, SSIM 0.9733)
+```
+
+The month is on every line rather than only in a header, because on a long month
+the header scrolls out of the window.
+
+The estimate is the recent seconds-per-photo rather than the average from the
+start, so it follows a month that changes camera part way through instead of
+taking another hour to notice. It is a guess, and it says so with a `~`. The
+count moves in steps of two or three when several photos are converted at once —
+results are reported in album order, so the ones that finish early wait for the
+photo in front of them.
+
 **Encoding is the whole cost** — importing is instant. Budget **about five
 seconds per photo** for 20-megapixel originals on a six-core Intel Mac; over a
 twelve-month run, everything that was not encoding — scanning, selecting,
@@ -425,7 +443,7 @@ offer that photo again, which is the right answer.
 swift test
 ```
 
-179 tests, no photo library and no permissions required: the gate is tested as
+194 tests, no photo library and no permissions required: the gate is tested as
 pure functions, the encoding path against synthetic images, and the generated
 AppleScript is compiled without being executed. `SafetyInvariantTests` is the one
 that matters most — see [TECHNICAL.md](TECHNICAL.md#the-safety-model).

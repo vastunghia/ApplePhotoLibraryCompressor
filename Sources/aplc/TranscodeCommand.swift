@@ -99,7 +99,13 @@ struct Transcode: AsyncParsableCommand {
         // a single queue rather than transcoded a month at a time: encoding is
         // per asset and knows nothing about months, so a year is one long list
         // and one honest summary at the end.
-        var assets: [PHAsset] = []
+        //
+        // Each asset is kept with the month it came from, because that is the
+        // one case where the month varies line by line: `convert --year` runs a
+        // separate `transcode` per month, but a bare `transcode --year` is one
+        // queue spanning twelve. A label taken from the command's own scope
+        // would be right everywhere except there.
+        var assets: [(asset: PHAsset, label: String)] = []
         for scope in source.scopes {
             // Chained means `convert` has already selected for the whole run;
             // doing it again here would be a second pass over the month for
@@ -114,7 +120,10 @@ struct Transcode: AsyncParsableCommand {
             } else {
                 collection = try scope.resolve()
             }
-            assets += PhotoLibraryAccess.imageAssets(in: collection)
+            // Empty in --album mode: there is one album, the user named it
+            // himself, and repeating it on every line would say nothing.
+            let label = scope.monthKey.map { MonthBounds.label(year: $0.year, month: $0.month) } ?? ""
+            assets += PhotoLibraryAccess.imageAssets(in: collection).map { ($0, label) }
         }
         guard !assets.isEmpty else {
             print(source.nothingLeftMessage)
@@ -143,7 +152,7 @@ struct Transcode: AsyncParsableCommand {
             // before the first conversion line appears.
             print("Reading keywords/title/caption for \(assets.count) assets from Photos...")
             textMetadata = try await PhotosScripting.readTextMetadata(
-                forIdentifiers: assets.map(\.localIdentifier)
+                forIdentifiers: assets.map(\.asset.localIdentifier)
             )
         } catch let error as PhotosScriptingError {
             textMetadataAvailable = false
@@ -174,10 +183,12 @@ struct Transcode: AsyncParsableCommand {
         // missed there would leave the recorder waiting for it forever.
         var queued: [(index: Int, job: Job)] = []
         var decided: [(index: Int, outcome: AssetConversion.Outcome)] = []
+        /// The month each slot's photo came from, for the progress prefix.
+        var labels: [String] = []
         var slots = 0
         var examined = 0
 
-        for asset in assets {
+        for (asset, label) in assets {
             if let limit, examined >= limit { break }
             // Checked before counting, exactly as when this was one loop: --limit
             // means "examine this many", and a photo an earlier run already
@@ -188,6 +199,9 @@ struct Transcode: AsyncParsableCommand {
             let traits = PhotoLibraryAccess.traits(for: asset)
             let index = slots
             slots += 1
+            // Parallel to the slots, so a released result can be labelled with
+            // the month its photo came from.
+            labels.append(label)
 
             if case .skip(let reason) = EligibilityGate.evaluatePreConditions(traits, policy: policy) {
                 decided.append((index, Self.skipOutcome(traits, reason)))
@@ -228,6 +242,16 @@ struct Transcode: AsyncParsableCommand {
         // line, and `apply --limit` still picks the same photos.
         // ---------------------------------------------------------------
         var sink = OrderedSink<AssetConversion.Outcome>()
+        // Which slots the gate already refused, so the estimate can tell the
+        // photos that cost an encode from the ones that cost nothing.
+        let decidedIndexes = Set(decided.map(\.0))
+        var progress = TranscodeProgress(total: decided.count + queued.count,
+                                         encodable: queued.count)
+        // Padded to the widest month in this run, so the prefixes line up when a
+        // bare `transcode --year` walks from May into September. One month wide
+        // is no padding at all, which is the usual case.
+        let labelWidth = Set(labels).filter { !$0.isEmpty }.map(\.count).max() ?? 0
+        let startedAt = Date()
         var converted = 0
         var withText = 0
         var sourceBytes = 0
@@ -238,10 +262,11 @@ struct Transcode: AsyncParsableCommand {
         var probes = 0
         var searched = 0
 
-        func record(_ outcome: AssetConversion.Outcome) throws {
+        func record(_ outcome: AssetConversion.Outcome, at index: Int) throws {
             try ledger.append(outcome.entry)
             probes += outcome.probes
             if outcome.searched { searched += 1 }
+            progress.advance(costAnEncode: !decidedIndexes.contains(index), at: Date())
 
             switch outcome.kind {
             case .converted(let result):
@@ -249,7 +274,10 @@ struct Transcode: AsyncParsableCommand {
                 if outcome.entry.sourceTextMetadata?.isEmpty == false { withText += 1 }
                 sourceBytes += result.result.sourceBytes
                 heicBytes += result.result.destinationBytes
-                print(String(format: "  %@  %@ -> %@  (%@ saved, q=%.2f, SSIM %.4f)",
+                let label = labels[index].padding(toLength: labelWidth,
+                                                  withPad: " ", startingAt: 0)
+                print(String(format: "  %@  %@  %@ -> %@  (%@ saved, q=%.2f, SSIM %.4f)",
+                             progress.prefix(label: label),
                              outcome.entry.originalFilename,
                              Format.bytes(result.result.sourceBytes),
                              Format.bytes(result.result.destinationBytes),
@@ -261,10 +289,20 @@ struct Transcode: AsyncParsableCommand {
             }
         }
 
+        /// Records everything the sink just released, which arrives without its
+        /// indexes — but `nextIndex` has advanced past exactly those slots, so
+        /// they are the ones ending there.
+        func recordReleased(_ released: [AssetConversion.Outcome]) throws {
+            let firstIndex = sink.nextIndex - released.count
+            for (offset, ready) in released.enumerated() {
+                try record(ready, at: firstIndex + offset)
+            }
+        }
+
         // Photos the gate refused without reading a byte. Parked at their own
         // index so they still print between the conversions they sit between.
         for (index, outcome) in decided {
-            for ready in sink.insert(outcome, at: index) { try record(ready) }
+            try recordReleased(sink.insert(outcome, at: index))
         }
 
         var cursor = 0
@@ -303,7 +341,7 @@ struct Transcode: AsyncParsableCommand {
                     chosenRungs.append(rung)
                 }
                 dispatch(&group)
-                for ready in sink.insert(outcome, at: index) { try record(ready) }
+                try recordReleased(sink.insert(outcome, at: index))
             }
         }
 
@@ -324,6 +362,10 @@ struct Transcode: AsyncParsableCommand {
                 ? "\(Format.bytes(sourceBytes - heicBytes))  (\(Format.percent(1 - Double(heicBytes) / Double(sourceBytes))))"
                 : "n/a"),
             ("downloaded from iCloud", Format.bytes(downloaded)),
+            // Wall time was only ever recoverable by reading timestamps back out
+            // of the journal, which is a strange thing to make someone do for the
+            // number they most want after a long run.
+            ("elapsed", Self.elapsedSummary(since: startedAt, converted: converted)),
         ]))
 
         if !skips.isEmpty {
@@ -411,6 +453,18 @@ struct Transcode: AsyncParsableCommand {
     static func median(of rungs: [Int]) -> Int? {
         guard !rungs.isEmpty else { return nil }
         return rungs.sorted()[rungs.count / 2]
+    }
+
+    /// "1h 12m  (4.9 s/photo)", or just the time when nothing was converted.
+    ///
+    /// Per *converted* photo rather than per examined one, so the figure means
+    /// the same thing in a month full of skips as in one without — and so it is
+    /// comparable with the seconds-per-photo quoted in the docs.
+    static func elapsedSummary(since start: Date, converted: Int) -> String {
+        let seconds = Date().timeIntervalSince(start)
+        let time = TranscodeProgress.duration(seconds)
+        guard converted > 0 else { return time }
+        return String(format: "%@  (%.1f s/photo)", time, seconds / Double(converted))
     }
 
     static func qualitySummary(

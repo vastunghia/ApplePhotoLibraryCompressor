@@ -394,6 +394,16 @@ ImageIO or VideoToolbox from more than one photo at a time has to go through it.
   journalled, so two runs of the same month stay comparable line by line and the
   journal reads as it always did. The cost is that one slow photo holds back the
   lines of the photos behind it.
+- **The progress estimate had to be built around that**, and it is the one place
+  the ordering leaks into something other than output. Because several results
+  are released the moment a slow photo lands, consecutive recordings can be
+  microseconds apart; timing the gaps between them would read a burst of three as
+  three photos in no time and collapse the estimate. So the rate is the span of a
+  window of recent photos divided by its length, which a burst cannot distort.
+  The window is recent rather than the whole run, so a month that changes camera
+  half way through is followed rather than averaged away — and photos the gate
+  refused without reading are excluded from the work remaining, since they cost
+  no measurable time.
 - **The seed becomes timing-dependent.** Each search starts from the rung earlier
   photos needed, and which photos have finished depends on the machine. So the
   number of encodes per photo varies between runs, and in the rare non-monotonic
@@ -610,7 +620,7 @@ Sources/APLCCore/          testable core, no CLI
   PhotosScripting.swift    Apple Events for keywords, title and caption
   Importer.swift           the only code that writes to the library
 Sources/aplc/              CLI subcommands
-Tests/APLCCoreTests/       179 tests, no photo library required
+Tests/APLCCoreTests/       194 tests, no photo library required
 ```
 
 `swift test` runs without a photo library: the gate is tested as pure functions,
