@@ -155,12 +155,24 @@ destructive scope calls above stay banned. If a future macOS withdraws the
 property the answer becomes "unknown", and an unknown copy is left out of the
 album and counted in the report rather than guessed into it.
 
+**That it discriminates was verified in the field, and the check was built to be
+capable of failing.** On a mostly-shared library the album comes out the same
+size as `Compressed Copies` every time, which is exactly what a read that always
+answered "yes" would produce — so the test needed a month holding both kinds. One
+was found by reading the library's own database rather than by asking the
+property under suspicion, since using it to choose its own test case would prove
+nothing. In that month only the shared original's copy went into the album, and
+it was the right one: the copy's creation instant matches that original and not
+any of the others.
+
 The alternatives were weighed and rejected. Putting *every* copy in the album
 needs no private API but invites moving personal photos into a shared library,
 which publishes them to other people. Reading `ZASSET.ZLIBRARYSCOPE` from the
-library's SQLite store is not private API, but needs a bundle path PhotoKit does
-not expose, Full Disk Access, and a read of a write-ahead log Photos holds open —
-more fragile, not less.
+library's SQLite store is not private API and is perfectly practical for a
+one-off question — it was how the verification above was done — but it is a
+poor foundation for the tool: it needs a bundle path PhotoKit does not expose,
+it needs whatever disk-access consent the OS asks for that year, and it binds a
+release to a private schema Apple revises whenever it likes.
 
 **Edit history** and the original **date added** are likewise not transferable,
 and photos with edits are refused by the gate for exactly that reason.

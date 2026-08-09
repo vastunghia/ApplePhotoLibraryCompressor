@@ -232,21 +232,22 @@ irreversible — the worst case is copies you delete by hand.
 
 The space does not come back until you do these. Do them **in this order**.
 
-1. **Review the copies.** They are in `aplc workspace > YYYY-MM > Compressed
-   Copies`. Look at a few at full size, next to their originals.
+1. **Review the copies.** They are in `aplc workspace > YYYY > YYYY-MM >
+   Compressed Copies`. Look at a few at full size, next to their originals.
 
 2. **Re-do the iCloud Shared Photo Library membership by hand.** If the originals
    were in your Shared Library, the copies are *not*: they are always created in
    your personal library, and no supported API can change that. The ones this
-   applies to are gathered in `aplc workspace > YYYY-MM > Compressed Copies - to
-   Share`, so it is a select-all and **Move to Shared Library**.
+   applies to are gathered in `aplc workspace > YYYY > YYYY-MM > Compressed
+   Copies - to Share`, so it is a select-all and **Move to Shared Library**.
 
    This comes before step 3 on purpose. Deleting a shared original removes it
    **for everyone it was shared with** — so if you delete first, the other
    participants lose the photo and your copy stays personal.
 
 3. **Delete the JPEG originals.** They are gathered for you in `aplc workspace >
-   YYYY-MM > Compressed Originals`, so it is one select-all and one keystroke.
+   YYYY > YYYY-MM > Compressed Originals`, so it is one select-all and one
+   keystroke.
 
    > **Inside an album you must press ⌘⌫ (Command-Delete), not plain ⌫.**
    > Plain ⌫ only removes the photo *from the album*: the file stays, no space is
