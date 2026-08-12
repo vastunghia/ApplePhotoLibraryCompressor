@@ -10,10 +10,12 @@ import Photos
 /// of it either. The alternatives were to put every copy in the album — which,
 /// with most of a library shared, is nearly the same list but invites moving
 /// personal photos into a shared library — or to read `ZASSET.ZLIBRARYSCOPE` out
-/// of the library's SQLite store, which needs the bundle path PhotoKit does not
-/// expose, Full Disk Access, and a read of a write-ahead log Photos holds open.
-/// The property below was measured to work unentitled and to agree with that
-/// column, so it is the least fragile of the three.
+/// of the library's SQLite store. That read is straightforward in itself; what
+/// rules it out is what it binds the tool to: a bundle path PhotoKit does not
+/// expose, whatever disk-access consent the OS asks for in a given year, and a
+/// private schema Apple revises whenever it likes. The property below was
+/// measured to work unentitled and to agree with that column, and it degrades to
+/// "unknown" instead of to a wrong answer.
 ///
 /// What this does **not** relax: `PHLibraryScopeChangeRequest`,
 /// `trashLibraryScopes` and `expungeLibraryScopes` remain banned by
