@@ -164,18 +164,75 @@ public enum Importer {
         return try await ensureAlbum(titled: title, in: month)
     }
 
-    /// Adds photos that are already in the library to an album.
+    /// Adds photos that are already in the library to an album, and returns how
+    /// many of them the album really holds afterwards.
     ///
     /// An album holds references, so this does not touch the photos themselves
     /// and cannot lose anything. It is nonetheless a one-way door: the inverse
     /// call is on the forbidden list in `SafetyInvariantTests`, so no command in
     /// this tool can ever take a photo back out. Filling the wrong album is
     /// undone by hand in Photos.app, and the CLI says so before it writes.
-    public static func add(_ assets: [PHAsset], to album: PHAssetCollection) async throws {
-        guard !assets.isEmpty else { return }
-        try await PHPhotoLibrary.shared().performChanges {
-            PHAssetCollectionChangeRequest(for: album)?.addAssets(assets as NSArray)
+    ///
+    /// **A large `addAssets` can be accepted and silently not made, so this one
+    /// goes in batches and reads back what landed.** Both halves were measured on
+    /// 2026-08-12 and neither is a precaution:
+    ///
+    /// - A run created every one of a month's copies, created the two albums they
+    ///   are filed in, and added nothing to either. `performChanges` returned
+    ///   without an error both times. The library's own row version counter for
+    ///   those albums proves the change was never made rather than made and
+    ///   undone: it still stood at its creation value.
+    /// - Asked to file the same photos again, days later and from a cold start,
+    ///   it failed the same way three times over — so it is not a race and not a
+    ///   backlog. The album was willing (`canPerform(.addContent)` true, and the
+    ///   change request was not nil), and the change still evaporated.
+    /// - The same photos, into the same album, **in batches of 100, all landed.**
+    ///
+    /// The threshold is not a clean count: a single add of 517 into a different
+    /// album had succeeded the same morning. So this does not pretend to know
+    /// where the ceiling is — it stays well under the one size known to fail, and
+    /// then checks, because the fault's whole character is that it is invisible.
+    /// Re-issuing what is still missing is safe to repeat: `addAssets` is
+    /// idempotent, an asset already in the album stays once. After that the
+    /// caller is told, because a silent short album is what cost a month of work
+    /// the first time.
+    @discardableResult
+    public static func add(
+        _ assets: [PHAsset], to album: PHAssetCollection, batchSize: Int = 100
+    ) async throws -> Int {
+        guard !assets.isEmpty else { return 0 }
+        let wanted = Set(assets.map(\.localIdentifier))
+
+        var pending = assets
+        // Whether the library would even accept a change for this album. Carried
+        // into the error because it splits the failure in two: "the album refused
+        // to be edited" and "the album accepted the edit and did not make it" are
+        // different faults, and without this the message cannot tell them apart.
+        var acceptedTheRequest = false
+        // Three passes: the first is the ordinary path, the other two exist only
+        // for the failure above. More would be waiting on a fault that batching
+        // already avoids, and `repair` covers the case where this still loses.
+        for _ in 0..<3 {
+            for batch in stride(from: 0, to: pending.count, by: batchSize).map({
+                Array(pending[$0..<Swift.min($0 + batchSize, pending.count)])
+            }) {
+                try await PHPhotoLibrary.shared().performChanges {
+                    guard let request = PHAssetCollectionChangeRequest(for: album) else { return }
+                    acceptedTheRequest = true
+                    request.addAssets(batch as NSArray)
+                }
+            }
+            let present = PhotoLibraryAccess.identifiers(in: album)
+            pending = pending.filter { !present.contains($0.localIdentifier) }
+            if pending.isEmpty { return wanted.count }
         }
+
+        throw PhotoLibraryError.assetsDidNotJoinAlbum(
+            album.localizedTitle ?? "album",
+            asked: wanted.count,
+            landed: wanted.count - pending.count,
+            wasEditable: acceptedTheRequest && album.canPerform(.addContent)
+        )
     }
 
     public enum ImportError: Error, CustomStringConvertible {

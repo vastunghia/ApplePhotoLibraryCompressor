@@ -41,6 +41,10 @@ struct Aplc: AsyncParsableCommand {
             Everything lives in "aplc workspace" > "YYYY" > "YYYY-MM" in Photos, with the
             originals and their copies side by side.
 
+            If a month's albums ever come up short — the copies are in your
+            library but "Compressed Originals" is empty — `aplc repair --year 2019
+            --month 7` rebuilds them from the journal. It converts nothing.
+
             Staging is temporary and leaves nothing on disk. The journal is not:
             every run appends to ~/Library/Application Support/aplc/, which is how
             a photo converted months ago is still known to have been converted.
@@ -51,7 +55,7 @@ struct Aplc: AsyncParsableCommand {
         version: "0.1.0",
         subcommands: [
             Convert.self, Select.self, Scan.self, Calibrate.self,
-            Transcode.self, Verify.self, Apply.self,
+            Transcode.self, Verify.self, Apply.self, Repair.self,
         ]
     )
 }

@@ -508,6 +508,45 @@ Rather than pretend otherwise, lookup accepts both: `aplc workspace > 2019 >
 
 Doing nothing is equally valid, and this is not a deprecation on a timer.
 
+### A large album fill can be accepted and not made
+
+Adding assets to an album is one `addAssets` inside one `performChanges`. That
+call **can complete without an error and without adding anything**, and this was
+measured rather than inferred:
+
+- A run created every one of a month's copies, created the two albums those
+  copies are filed beside, and added nothing to either. Neither call reported a
+  problem, and the run reported the full counts, because it was counting what it
+  had asked for.
+- The library's own record settles what happened. Core Data keeps a version
+  counter on every row; on both albums it still stood at the value it had when
+  the album was created, and the last-modified date still matched the creation
+  date to the second. The change was never made — not made and then undone, and
+  not removed by hand afterwards.
+- Asked to file the same photos again days later, from a cold start, it failed
+  the same way three times in a row. So it is not a race and not a backlog. The
+  album was willing: `canPerform(.addContent)` was true and the change request
+  was not nil. The change simply evaporated.
+- **The same photos, into the same album, in batches of a hundred: all of them
+  landed.**
+
+The threshold is not a plain count — a single add of over five hundred assets
+into a different album had succeeded the same morning — so the tool does not
+claim to know where the ceiling is. It does two things instead, and both are
+cheap: it adds in batches well under the size known to fail, and it re-reads the
+album afterwards and compares. What is still missing is re-issued, since
+`addAssets` is idempotent; what is missing after that is **reported**, never
+assumed.
+
+That reporting is the part that matters. The failure's whole character is that it
+is invisible: every count a run prints about an album is now the album's own
+membership rather than the size of the request, so a short album cannot be
+mistaken for a full one. And because nothing is lost when it happens — the copies
+are in the library, the journal has them, only the album is short — the remedy is
+to rebuild the album rather than to convert anything again. That is what
+`aplc repair` does, from the journal, with no staging directory and no time
+limit.
+
 ## How the tool knows what is already converted
 
 A library too large to convert in one go has to be worked through in pieces, and

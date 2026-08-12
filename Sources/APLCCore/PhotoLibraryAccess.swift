@@ -10,6 +10,7 @@ public enum PhotoLibraryError: Error, CustomStringConvertible {
     case noOriginalResource(String)
     case resourceUnavailableLocally
     case exportFailed(String)
+    case assetsDidNotJoinAlbum(String, asked: Int, landed: Int, wasEditable: Bool)
 
     public var description: String {
         switch self {
@@ -32,6 +33,14 @@ public enum PhotoLibraryError: Error, CustomStringConvertible {
             return "original is not available locally"
         case .exportFailed(let m):
             return "export failed: \(m)"
+        case .assetsDidNotJoinAlbum(let title, let asked, let landed, let wasEditable):
+            let why = wasEditable
+                ? "the library accepted the change and did not make it"
+                : "the library will not let this album take new photos"
+            return """
+                \(landed) of \(asked) photo(s) reached "\(title)": \(why). Nothing was \
+                lost — the album is short, not wrong.
+                """
         }
     }
 }

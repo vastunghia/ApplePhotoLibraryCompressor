@@ -218,6 +218,23 @@ final class WorkspaceLayoutTests: XCTestCase {
         XCTAssertEqual(names.sorted(), ["2026-01", "2026-02", "2026-10", "2026-12"])
     }
 
+    /// The round trip is what lets a report turn the folder names the commands
+    /// carry around back into the `--year --month` a user would type.
+    func testMonthKeyOfAFolderNameIsTheInverseOfMonthFolder() {
+        for key in MonthKey.months(inYear: 2019) {
+            XCTAssertEqual(WorkspaceLayout.monthKey(ofFolderNamed: WorkspaceLayout.monthFolder(key)),
+                           key)
+        }
+    }
+
+    /// A folder that names no month must yield none, rather than a plausible
+    /// wrong one: the caller prints a command from it.
+    func testMonthKeyRefusesNamesThatAreNotMonths() {
+        for name in [WorkspaceLayout.undatedFolder, "2019", "Holidays", "2019-13", "2019-00", "abcd-ef"] {
+            XCTAssertNil(WorkspaceLayout.monthKey(ofFolderNamed: name), name)
+        }
+    }
+
     func testMonthOfADateInTheMiddleOfAMonth() {
         XCTAssertEqual(WorkspaceLayout.month(of: date("2026-02-08 11:26:20"), calendar: utc),
                        MonthKey(year: 2026, month: 2))

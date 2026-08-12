@@ -250,10 +250,13 @@ extension Select {
             .filter { !existing.contains($0.localIdentifier) }
             .compactMap { assetsByIdentifier[$0.localIdentifier] }
 
-        try await Importer.add(toAdd, to: destination)
+        // The count comes back from the album rather than from the request: an
+        // add can be accepted and not made, so `toAdd.count` is what was asked
+        // for and not what the user will see in the sidebar. See `Importer.add`.
+        let added = try await Importer.add(toAdd, to: destination)
 
         return Outcome(label: label, selection: selection, destination: destination,
-                       added: toAdd.count,
+                       added: added,
                        alreadyInAlbum: selection.candidates.count - toAdd.count)
     }
 }

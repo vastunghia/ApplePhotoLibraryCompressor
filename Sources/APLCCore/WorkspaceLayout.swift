@@ -116,6 +116,20 @@ public enum WorkspaceLayout {
         String(format: "%04d-%02d", key.year, key.month)
     }
 
+    /// The month a folder name addresses, or nil when it names no month —
+    /// `undated`, or a folder the user made himself. The inverse of
+    /// `monthFolder`, and pure for the same reason `insertionIndex` is: it turns
+    /// the folder names carried around by the commands back into the `--year
+    /// --month` a user would type, and that mapping is worth testing on its own.
+    public static func monthKey(ofFolderNamed name: String) -> MonthKey? {
+        guard yearPrefix(of: name) != nil else { return nil }
+        let parts = name.split(separator: "-")
+        guard let year = Int(parts[0]), let month = Int(parts[1]), (1...12).contains(month) else {
+            return nil
+        }
+        return MonthKey(year: year, month: month)
+    }
+
     /// "2019". The folder a year's months live in.
     public static func yearFolder(_ year: Int) -> String {
         String(format: "%04d", year)
@@ -179,8 +193,12 @@ public enum WorkspaceLayout {
     /// Spelled the way the user would find it in the sidebar, and in one place so
     /// that a change to the tree cannot leave four hand-built strings behind.
     public static func displayPath(album: String, inFolderNamed folder: String) -> String {
-        (([rootFolder] + folderPath(forFolderNamed: folder)) + [album])
-            .joined(separator: " > ")
+        displayPath(folderNamed: folder) + " > " + album
+    }
+
+    /// The same, stopping at the folder: `aplc workspace > 2019 > 2019-07`.
+    public static func displayPath(folderNamed folder: String) -> String {
+        ([rootFolder] + folderPath(forFolderNamed: folder)).joined(separator: " > ")
     }
 
     /// Where a copy of an undated photo goes.

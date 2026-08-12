@@ -243,6 +243,9 @@ struct Apply: AsyncParsableCommand {
         var perDestination: [String: Int] = [:]
         /// Month folder -> the JPEGs whose copy this run created.
         var convertedOriginals: [String: [PHAsset]] = [:]
+        /// Month folder -> the copies this run created, so their own filing can
+        /// be confirmed afterwards like every other album fill.
+        var createdCopies: [String: [String]] = [:]
         /// Month folder -> the new copies whose original was in a shared library.
         ///
         /// Identifiers rather than assets: the copy has just been created, so the
@@ -439,6 +442,7 @@ struct Apply: AsyncParsableCommand {
                 // one per photo, and only a copy that actually got created earns
                 // its original a place in the deletable album.
                 convertedOriginals[folder, default: []].append(sourceAsset)
+                createdCopies[folder, default: []].append(identifier)
                 // Asked of the original while it is still in hand, since the
                 // copy cannot answer: it is created in the personal library
                 // whatever its original was. A property read on an asset already
@@ -479,6 +483,48 @@ struct Apply: AsyncParsableCommand {
             }
         }
 
+        // Every album fill below is counted by what the album *holds* afterwards,
+        // never by what was handed to it, and a failure is collected rather than
+        // thrown. Both come from the same incident: a run once filed a whole
+        // month's copies, added nothing to either of these two albums, and
+        // reported the full count for both — see `Importer.add`. Throwing here
+        // would be the other half of that mistake, since the second album would
+        // then never be attempted at all.
+        var albumProblems: [String] = []
+        /// Month folders whose albums came up short, so the report can name the
+        /// exact `repair` command rather than the shape of one.
+        var problemFolders: Set<String> = []
+        /// Runs one album fill, and turns a refusal into a line instead of an exit.
+        func fill(
+            _ assets: [PHAsset], into album: PHAssetCollection,
+            titled title: String, inFolder folder: String?
+        ) async -> Int {
+            let existing = PhotoLibraryAccess.identifiers(in: album)
+            let toAdd = assets.filter { !existing.contains($0.localIdentifier) }
+            do {
+                return try await Importer.add(toAdd, to: album)
+            } catch {
+                let path = folder.map { WorkspaceLayout.displayPath(album: title, inFolderNamed: $0) }
+                    ?? "\"\(title)\""
+                albumProblems.append("\(path): \(error)")
+                if let folder { problemFolders.insert(folder) }
+                return 0
+            }
+        }
+
+        // Each copy was filed as it was created, inside the same change as the
+        // creation — which is the same call that can succeed without doing
+        // anything. Confirmed here once per album rather than once per photo, so
+        // it costs one fetch each rather than one per conversion.
+        for (folder, identifiers) in createdCopies.sorted(by: { $0.key < $1.key }) {
+            let album = try await destination(forFolderNamed: folder)
+            _ = await fill(
+                PhotoLibraryAccess.assets(withIdentifiers: identifiers), into: album,
+                titled: destAlbum ?? WorkspaceLayout.copiesAlbum,
+                inFolder: destAlbum == nil ? folder : nil
+            )
+        }
+
         // The JPEGs that now have a replacement, gathered where the user can
         // select them all and delete them in one gesture. Skipped in --dest-album
         // mode: that flag says "keep out of the workspace", and this album has
@@ -489,10 +535,10 @@ struct Apply: AsyncParsableCommand {
                 let album = try await Importer.ensureWorkspaceAlbum(
                     WorkspaceLayout.convertedOriginalsAlbum, inFolderNamed: folder
                 )
-                let existing = PhotoLibraryAccess.identifiers(in: album)
-                let toAdd = originals.filter { !existing.contains($0.localIdentifier) }
-                try await Importer.add(toAdd, to: album)
-                markedForDeletion += toAdd.count
+                markedForDeletion += await fill(
+                    originals, into: album,
+                    titled: WorkspaceLayout.convertedOriginalsAlbum, inFolder: folder
+                )
             }
         }
 
@@ -507,10 +553,10 @@ struct Apply: AsyncParsableCommand {
                 let album = try await Importer.ensureWorkspaceAlbum(
                     WorkspaceLayout.sharedCopiesAlbum, inFolderNamed: folder
                 )
-                let existing = PhotoLibraryAccess.identifiers(in: album)
-                let toAdd = copies.filter { !existing.contains($0.localIdentifier) }
-                try await Importer.add(toAdd, to: album)
-                toReshare += toAdd.count
+                toReshare += await fill(
+                    copies, into: album,
+                    titled: WorkspaceLayout.sharedCopiesAlbum, inFolder: folder
+                )
             }
         }
 
@@ -532,6 +578,22 @@ struct Apply: AsyncParsableCommand {
         }
         rows.append(("keywords/title/caption transferred", textReport.summary))
         print(Format.table(rows))
+
+        // Said straight after the counts, because the counts above are the ones
+        // these lines qualify: an album that refused its photos makes
+        // "originals now replaceable" smaller than "assets created", and without
+        // this the difference would look like a decision rather than a fault.
+        if !albumProblems.isEmpty {
+            print("\nAlbums that did not take everything")
+            for problem in albumProblems { print("  \(problem)") }
+            print("""
+
+                The copies themselves are in your library and the journal has them, \
+                so nothing is lost and nothing needs converting again — the albums \
+                are short. Put them right with:
+                """)
+            for command in Self.repairCommands(for: problemFolders) { print("  \(command)") }
+        }
 
         if stopped {
             print("\nStopped at your request. Nothing after that point was touched.")
@@ -740,6 +802,20 @@ struct Apply: AsyncParsableCommand {
         guard Set(expected.keywords) == Set(actual.keywords) else { return false }
         guard (expected.title ?? "") == (actual.title ?? "") else { return false }
         return (expected.caption ?? "") == (actual.caption ?? "")
+    }
+
+    /// The `repair` invocations that would put these months' albums right.
+    ///
+    /// A folder that names no month — `undated`, or one made by hand — has no
+    /// such invocation, so it is named on its own rather than turned into a
+    /// command that would not work.
+    static func repairCommands(for folders: Set<String>) -> [String] {
+        folders.sorted().map { folder in
+            guard let key = WorkspaceLayout.monthKey(ofFolderNamed: folder) else {
+                return "\(folder): no --year/--month addresses this folder; add the photos by hand."
+            }
+            return "aplc repair --year \(key.year) --month \(key.month)"
+        }
     }
 
     /// Keeps the original stem so the pair stays recognisable side by side — and

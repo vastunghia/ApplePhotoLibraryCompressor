@@ -344,8 +344,29 @@ looking at things:
 | `aplc calibrate --files a.jpg b.jpg` | The same on plain files, with no library access at all. |
 | `aplc select --year Y --month M` | Just the "what is left to convert" step, on its own. |
 | `aplc transcode` / `verify` / `apply` | The individual stages. Staging is temporary, so they cannot hand work to each other across separate runs — `convert` is what runs them in one process. |
+| `aplc repair --year Y --month M` | Rebuilds a month's albums from the journal. Converts nothing. |
 
 Each of these takes a bare `--year Y` as well, meaning all twelve months.
+
+### If a month's albums come up short
+
+Putting photos into an album is a change the photo library can accept and then
+not make — no error, nothing added. `aplc` now checks every album it fills and
+tells you when this happens, but a month converted before it did could have
+ended up with all its copies safely in your library and an empty *Compressed
+Originals* beside them.
+
+`aplc repair --year 2023 --month 8` puts that right. It converts nothing and
+needs nothing kept from the original run: it reads the journal for what was
+converted, asks your library which of it is still there, and adds only what is
+missing. Running it on a month that is already fine changes nothing and says so,
+so it is safe to try.
+
+It rebuilds *Compressed Copies*, *Compressed Originals* and *Compressed Copies -
+to Share*. *Selected Originals* is `aplc select`'s album, and re-running that
+rebuilds it. Two things it will not do, both deliberate: a copy you have since
+deleted is not put back, and a JPEG you have already deleted is not gathered for
+deletion a second time.
 
 Options worth knowing:
 
@@ -408,6 +429,14 @@ offer that photo again, which is the right answer.
   expected.
 - **`verify` re-checks structure and hashes**, and does not re-export originals to
   recompute fidelity from scratch.
+- **Putting photos into an album is not perfectly reliable, and that is the
+  library's behaviour rather than the tool's.** A large enough request can be
+  accepted and then not carried out, with no error reported. `aplc` adds in small
+  batches, reads the album back and tells you if it came up short, and every
+  count it prints about an album is what the album actually holds. When it does
+  happen nothing is lost — the copies are in your library either way — and
+  [`aplc repair`](#if-a-months-albums-come-up-short) rebuilds the album from the
+  journal.
 - **Photos only.** In a library that holds much video, transcoding H.264 to HEVC
   would usually reclaim more space than anything this tool does. It is not
   implemented, and it is a considerably harder problem.
@@ -444,7 +473,7 @@ offer that photo again, which is the right answer.
 swift test
 ```
 
-194 tests, no photo library and no permissions required: the gate is tested as
+206 tests, no photo library and no permissions required: the gate is tested as
 pure functions, the encoding path against synthetic images, and the generated
 AppleScript is compiled without being executed. `SafetyInvariantTests` is the one
 that matters most — see [TECHNICAL.md](TECHNICAL.md#the-safety-model).
