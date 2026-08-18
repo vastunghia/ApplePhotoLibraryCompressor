@@ -488,6 +488,36 @@ chronological place rather than appended, and so is a year. Their names are
 zero-padded (`2026-02`) so that comparing them as text *is* comparing dates —
 useful wherever the names are read, but not what orders the sidebar.
 
+### The order of the photos inside an album
+
+Same rule one level down: **an album shows its photos in the order they were
+added**, and nothing supported can reorder them afterwards — `removeAssets` is
+forbidden, so a mistake here is as permanent as the album order above. What each
+album holds is therefore decided by the order of the list handed to the add.
+
+Three of the four are filled from lists built in album order — the order `select`
+fetched them in, which is by capture date — so they agree with each other. The
+fourth is filled from identifiers, and identifiers had to be turned back into
+assets first. That is where the order was being lost:
+**`PHAsset.fetchAssets(withLocalIdentifiers:)` does not answer in the order it
+was asked.** It reads an index on the asset's UUID and answers in *that* order,
+which to anyone looking at photographs is no order at all.
+
+Measured on 2026-08-18 by reading the library's own database, since the
+membership order is stored (`Z_FOK_…` in the album's join table) and can be
+compared against both capture date and UUID: every month of the one album filled
+from such a fetch was in exact UUID order, and no other album of more than a
+handful of photos was. So `PhotoLibraryAccess.assets(withIdentifiers:)` now
+restores the order it was asked in, and the rule is a pure function tested
+without a photo library like the others.
+
+Two things follow. The fix is in the fetch helper rather than at the call site,
+so `repair` — which rebuilds all three of a month's albums from identifiers —
+gets it too. And albums filled before the fix **keep the order they have**: the
+tool cannot take a photo out of an album to put it back in its place. Photos.app
+can sort an album by date from its View menu, one album at a time; that is a
+per-album setting in the library, and it is the only route.
+
 ### Two layouts, accepted on purpose
 
 A folder cannot be moved out of its parent — `PHCollection` has exactly one, and
@@ -671,7 +701,7 @@ Sources/APLCCore/          testable core, no CLI
   PhotosScripting.swift    Apple Events for keywords, title and caption
   Importer.swift           the only code that writes to the library
 Sources/aplc/              CLI subcommands
-Tests/APLCCoreTests/       194 tests, no photo library required
+Tests/APLCCoreTests/       210 tests, no photo library required
 ```
 
 `swift test` runs without a photo library: the gate is tested as pure functions,

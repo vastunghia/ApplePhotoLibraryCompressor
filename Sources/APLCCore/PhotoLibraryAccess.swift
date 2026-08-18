@@ -213,13 +213,48 @@ public enum PhotoLibraryAccess {
         return found
     }
 
-    /// The assets these identifiers name, skipping any that no longer exist.
+    /// The assets these identifiers name, skipping any that no longer exist,
+    /// **in the order they were asked for**.
     ///
     /// One fetch rather than one each, as above. Used to turn the identifiers a
-    /// creation returned back into assets that can be filed into an album.
+    /// creation returned back into assets that can be filed into an album — and
+    /// an album shows its photos in the order they were added, so the order of
+    /// this array is the order the user ends up looking at.
+    ///
+    /// **`fetchAssets(withLocalIdentifiers:)` does not answer in the order it
+    /// was asked**, which is why the reorder is here rather than at the one
+    /// caller that seemed to care. Measured on 2026-08-18 against the library
+    /// itself: every month of `Compressed Copies - to Share`, the one album
+    /// filled straight from this fetch, was in exact `ZUUID` order — 105 months
+    /// out of 105 — while the three albums filled from lists built in album
+    /// order agreed with each other. The fetch reads an index on the UUID, so
+    /// the result looks shuffled to anyone reading it as photographs.
     public static func assets(withIdentifiers identifiers: [String]) -> [PHAsset] {
         guard !identifiers.isEmpty else { return [] }
-        return materialise(PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil))
+        let fetched = materialise(
+            PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        )
+        return ordered(fetched, like: identifiers, by: \.localIdentifier)
+    }
+
+    /// Puts fetched items back into the order their identifiers were given in.
+    ///
+    /// Pure, and free of PhotoKit, so the rule above is tested without a photo
+    /// library like the rest of the core. Anything the fetch did not return
+    /// drops out, which is what makes the caller's "skipping any that no longer
+    /// exist" still true; a repeated identifier yields its item once, so the
+    /// result stays a list that can be handed to `Importer.add`.
+    static func ordered<Item>(
+        _ items: [Item], like identifiers: [String], by key: (Item) -> String
+    ) -> [Item] {
+        var byIdentifier: [String: Item] = [:]
+        byIdentifier.reserveCapacity(items.count)
+        for item in items { byIdentifier[key(item)] = item }
+        var seen: Set<String> = []
+        return identifiers.compactMap { identifier in
+            guard seen.insert(identifier).inserted else { return nil }
+            return byIdentifier[identifier]
+        }
     }
 
     private static func materialise(_ result: PHFetchResult<PHAsset>) -> [PHAsset] {

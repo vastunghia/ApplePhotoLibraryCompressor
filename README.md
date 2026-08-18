@@ -302,6 +302,14 @@ there, indefinitely, and nothing breaks if you leave them. Drag one into a year
 folder whenever you like and it will be found there instead — there is no
 migration step to run, and none is needed.
 
+The same holds for the photos **inside** an album: Photos keeps them in the order
+they arrived, so all four albums of a month read in the order the tool worked
+through them, which is by capture date. Versions
+before this one filled `Compressed Copies - to Share` in an order of Photos' own
+choosing, which looks shuffled — and, for the same reason as above, the tool
+cannot tidy an album it has already filled. If it bothers you, select that album
+in Photos.app and sort it from the **View > Sort** menu.
+
 Copies are filed by the **capture date of the original**, not by when you
 converted them, so a photo you convert next year still lands beside the JPEG it
 came from. Photos with no capture date at all go to `aplc workspace > undated`.
@@ -473,7 +481,7 @@ offer that photo again, which is the right answer.
 swift test
 ```
 
-206 tests, no photo library and no permissions required: the gate is tested as
+210 tests, no photo library and no permissions required: the gate is tested as
 pure functions, the encoding path against synthetic images, and the generated
 AppleScript is compiled without being executed. `SafetyInvariantTests` is the one
 that matters most — see [TECHNICAL.md](TECHNICAL.md#the-safety-model).
